@@ -6,7 +6,7 @@ use melior::{
     ir::{Block, BlockLike, Region, RegionLike, Type, Value, ValueLike, operation::OperationBuilder},
 };
 
-use super::Lowered;
+use super::{Lowered, layout};
 use crate::codegen::{Codegen, MemVal, detach};
 use crate::shape::DYN;
 use crate::ir::{Ir, OpId, OpKind, Pipeline, ValueId};
@@ -45,19 +45,19 @@ impl<'c> Codegen<'c> {
 
         // Prologue: stage iteration 0 into each pair's first buffer.
         let mut bufs0 = Vec::with_capacity(info.staged);
-        let mut pads = Vec::with_capacity(info.staged);
+        let mut layouts = Vec::with_capacity(info.staged);
         let mut srcs = Vec::with_capacity(info.staged);
         self.lowered.push(HashMap::new());
         self.set_ir(iv, Lowered::Scalar(lo));
         let prologue = (|| {
             for &o in prefix {
-                if let OpKind::Stage(stage) = ir.kind(o) {
+                if matches!(ir.kind(o), OpKind::Stage(_)) {
                     let src = self.tile_ir(ir, ir.operand(o, 0))?;
-                    let swizzled = matches!(ir.ty(ir.result(o)), crate::ir::Type::Tile(t) if t.layout.swizzle.is_some());
-                    let b0 = self.alloc_stage_buf(block, &src, stage.pad, swizzled)?;
+                    let layout = layout(ir, ir.result(o));
+                    let b0 = self.alloc_tile_as(block, src.elem, &src.shape, &layout)?;
                     self.tile_copy(block, &src, &b0, true, false)?;
                     bufs0.push(b0);
-                    pads.push((stage.pad, swizzled));
+                    layouts.push(layout);
                     srcs.push(src);
                 } else {
                     self.emit_op(block, ir, o)?;
@@ -85,8 +85,8 @@ impl<'c> Codegen<'c> {
         if single {
             bufs1.clone_from(&bufs0);
         } else {
-            for (src, &pad) in srcs.iter().zip(&pads) {
-                bufs1.push(self.alloc_stage_buf(block, src, pad.0, pad.1)?);
+            for (src, layout) in srcs.iter().zip(&layouts) {
+                bufs1.push(self.alloc_tile_as(block, src.elem, &src.shape, layout)?);
             }
         }
 
@@ -371,17 +371,6 @@ impl<'c> Codegen<'c> {
             self.barrier(block)?;
         }
         Ok(out)
-    }
-
-    /// A buffer for a stage of `src`, padded when the stage asks.
-    fn alloc_stage_buf(&mut self, block: &Block<'c>, src: &MemVal<'c>, pad: bool, swizzled: bool) -> Result<MemVal<'c>> {
-        if pad {
-            self.alloc_tile_padded(block, src.elem, &src.shape)
-        } else if swizzled {
-            self.alloc_tile_swizzled(block, src.elem, &src.shape)
-        } else {
-            self.alloc_tile_shaped(block, src.elem, &src.shape)
-        }
     }
 
     /// How a thread copies its share of `src` into `dst` through registers,

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use melior::ir::Block;
 
-use super::{Fill, Lowered, dims};
+use super::{Fill, Lowered, dims, layout};
 use crate::ast::{AssignOp, BinOp};
 use crate::codegen::elemwise::{ElemStep, Fused};
 use crate::codegen::tile::RowSrc;
@@ -25,14 +25,7 @@ impl<'c> Codegen<'c> {
                     return self.emit_scalar_op(block, ir, op);
                 }
                 let elem = self.ir_scalar_type(t.elem);
-                let shape = dims(&t.shape);
-                let mv = if t.layout.row_stride.is_some() {
-                    self.alloc_tile_padded(block, elem, &shape)?
-                } else if t.layout.swizzle.is_some() {
-                    self.alloc_tile_swizzled(block, elem, &shape)?
-                } else {
-                    self.alloc_tile_shaped(block, elem, &shape)?
-                };
+                let mv = self.alloc_tile_as(block, elem, &dims(&t.shape), &t.layout)?;
                 self.set_ir(ir.result(op), Lowered::Tile(mv));
             }
             OpKind::Slice(s) => {
@@ -72,14 +65,8 @@ impl<'c> Codegen<'c> {
             OpKind::Stage(_) if self.wait_rotation(block, ir, op)? => {}
             OpKind::Stage(stage) => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
-                let swizzled = matches!(ir.ty(ir.result(op)), ir::Type::Tile(t) if t.layout.swizzle.is_some());
-                let tile = if stage.pad {
-                    self.alloc_tile_padded(block, src.elem, &src.shape)?
-                } else if swizzled {
-                    self.alloc_tile_swizzled(block, src.elem, &src.shape)?
-                } else {
-                    self.alloc_tile_shaped(block, src.elem, &src.shape)?
-                };
+                // A padded stage's type has the row stride, as `stage.pad` says.
+                let tile = self.alloc_tile_as(block, src.elem, &src.shape, &layout(ir, ir.result(op)))?;
                 if !self.defer_stage(block, ir, op, &src, &tile)? {
                     self.tile_copy(block, &src, &tile, stage.sync, false)?;
                 }
@@ -92,11 +79,8 @@ impl<'c> Codegen<'c> {
             }
             OpKind::HoistStage => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
-                let buf = if self.has_mma_sync() {
-                    self.alloc_tile_swizzled(block, self.f16_t, &src.shape)?
-                } else {
-                    self.alloc_tile_shaped(block, self.f16_t, &src.shape)?
-                };
+                // Swizzled for mma.sync's fragment loads, as the build typed it.
+                let buf = self.alloc_tile_as(block, self.f16_t, &src.shape, &layout(ir, ir.result(op)))?;
                 self.stage_to_f16(block, &src, &buf, false)?;
                 self.set_ir(ir.result(op), Lowered::Tile(buf));
             }

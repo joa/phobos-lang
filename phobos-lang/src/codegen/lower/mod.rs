@@ -375,3 +375,8 @@ impl<'c> Codegen<'c> {
 pub(super) fn dims(shape: &[ir::Extent]) -> Vec<i64> {
     shape.iter().map(|e| e.fixed().unwrap_or(DYN)).collect()
 }
+
+/// The layout of a tile value, contiguous for any other.
+pub(super) fn layout(ir: &Ir, v: ValueId) -> ir::Layout {
+    ir.ty(v).as_tile().map_or(ir::Layout::CONTIGUOUS, |t| t.layout)
+}

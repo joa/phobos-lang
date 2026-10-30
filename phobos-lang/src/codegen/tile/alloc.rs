@@ -340,6 +340,26 @@ impl<'c> Codegen<'c> {
         Ok(mv)
     }
 
+    /// A tile buffer laid out as a graph value's `layout` says: padded when
+    /// it has a row stride, swizzled when it has a swizzle, plain otherwise.
+    /// The pitch and the permutation are the allocators' own, which the
+    /// build's layouts are made to match.
+    pub(in crate::codegen) fn alloc_tile_as(
+        &mut self,
+        block: &Block<'c>,
+        elem: Type<'c>,
+        shape: &[i64],
+        layout: &crate::ir::Layout,
+    ) -> Result<MemVal<'c>> {
+        if layout.row_stride.is_some() {
+            self.alloc_tile_padded(block, elem, shape)
+        } else if layout.swizzle.is_some() {
+            self.alloc_tile_swizzled(block, elem, shape)
+        } else {
+            self.alloc_tile_shaped(block, elem, shape)
+        }
+    }
+
     /// Aliases a tile as one row `[1, rows * cols]`. Nothing is allocated and
     /// no data moves.
     pub(in crate::codegen) fn tile_flat(
