@@ -68,7 +68,7 @@ fn has_min(fmt: &str) -> bool {
 fn every_format_stages_both_operands_and_reads_them_with_ldmatrix() {
     // At 64-bit indices, which `Kernel::wants_ldmatrix` asks for.
     for (fmt, tables) in FORMATS {
-        let mlir = emit_mlir_sync(&qgemm_src(fmt, tables, "256, 2"), "sm_75");
+        let mlir = emit_with(&qgemm_src(fmt, tables, "256, 2"), "sm_75", 64);
         assert_contains(
             &mlir,
             &["nvgpu.ldmatrix", "vector<4x4xi8>", "nvgpu.mma.sync", "gpu.barrier", "iter_args"],
@@ -102,14 +102,14 @@ fn a_k_quant_given_its_group_sums_neither_sums_nor_contracts_them() {
     // summing bytes and shuffling, and from sm_80 the row-sum mma against
     // ones goes, leaving the patch's eight tiles per group.
     for fmt in ["q4k", "q5k"] {
-        let turing = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_75");
+        let turing = emit_with(&qgemm_sums_src(fmt), "sm_75", 64);
         assert!(turing.contains("memref<128x12xf32, 3>"), "{turing}");
         for absent in ["nvvm.dot.accumulate.4way", "gpu.shuffle", "memref<128x4xi32, 3>"] {
             assert!(!turing.contains(absent), "{fmt} {absent}:
 {turing}");
         }
-        let ampere = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_86");
-        let summing = emit_mlir_sync(&qgemm_src(fmt, &[], "256, 2"), "sm_86");
+        let ampere = emit_with(&qgemm_sums_src(fmt), "sm_86", 64);
+        let summing = emit_with(&qgemm_src(fmt, &[], "256, 2"), "sm_86", 64);
         let (given, own) = (ampere.matches("nvgpu.mma.sync").count(), summing.matches("nvgpu.mma.sync").count());
         assert_eq!(given % 8, 0, "{ampere}");
         assert_eq!(own, given / 8 * 10, "{fmt}: {own} mma with its own sums, {given} given them");
@@ -160,9 +160,9 @@ fn sm_80_on_contracts_with_m16n8k32_and_blackwell_at_one_cta_an_sm() {
     // loaded whole, for a format with a scale per 32 elements. sm_120 has no native m8n8k16 and holds more of them, so
     // it asks for one CTA an SM; Ada keeps two, and Turing the narrow shape.
     let src = qgemm_src("q4k", &[], "256, 2");
-    let turing = emit_mlir_sync(&src, "sm_75");
-    let ada = emit_mlir_sync(&src, "sm_89");
-    let blackwell = emit_mlir_sync(&src, "sm_120");
+    let turing = emit_with(&src, "sm_75", 64);
+    let ada = emit_with(&src, "sm_89", 64);
+    let blackwell = emit_with(&src, "sm_120", 64);
     assert!(turing.contains("mmaShape = [8, 8, 16]") && !turing.contains("mmaShape = [16, 8, 32]"), "{turing}");
     for wide in [&ada, &blackwell] {
         assert!(wide.contains("mmaShape = [16, 8, 32]") && !wide.contains("mmaShape = [8, 8, 16]"), "{wide}");
@@ -171,8 +171,8 @@ fn sm_80_on_contracts_with_m16n8k32_and_blackwell_at_one_cta_an_sm() {
     assert!(blackwell.contains("nvvm.minctasm = 1"), "{blackwell}");
     // A scale per 16 elements keeps the native narrow shape until Blackwell.
     let split = qgemm_src("iq2s", &[8192, 2048], "256, 2");
-    let ada = emit_mlir_sync(&split, "sm_89");
-    let blackwell = emit_mlir_sync(&split, "sm_120");
+    let ada = emit_with(&split, "sm_89", 64);
+    let blackwell = emit_with(&split, "sm_120", 64);
     assert!(ada.contains("mmaShape = [8, 8, 16]") && !ada.contains("mmaShape = [16, 8, 16]"), "{ada}");
     assert!(blackwell.contains("mmaShape = [16, 8, 16]") && !blackwell.contains("mmaShape = [8, 8, 16]"), "{blackwell}");
 }
@@ -183,8 +183,8 @@ fn m16n8k32_sums_the_activation_groups_itself() {
     // stages a plane of them; the wide shape takes them from one more mma
     // per row pair against ones, as many ldmatrix as before.
     let src = qgemm_src("q4k", &[], "256, 2");
-    let turing = emit_mlir_sync(&src, "sm_75");
-    let ampere = emit_mlir_sync(&src, "sm_86");
+    let turing = emit_with(&src, "sm_75", 64);
+    let ampere = emit_with(&src, "sm_86", 64);
     assert!(turing.contains("memref<128x4xi32, 3>"), "{turing}");
     assert!(!ampere.contains("memref<128x4xi32, 3>"), "{ampere}");
     assert_eq!(turing.matches("nvvm.ldmatrix").count(), ampere.matches("nvvm.ldmatrix").count());
@@ -196,8 +196,8 @@ fn m16n8k32_sums_the_activation_groups_itself() {
 fn sm_80_copies_the_activation_tile_with_cp_async_where_two_fit() {
     for (fmt, tables) in FORMATS {
         let src = qgemm_src(fmt, tables, "256, 2");
-        let turing = emit_mlir_sync(&src, "sm_75");
-        let ampere = emit_mlir_sync(&src, "sm_80");
+        let turing = emit_with(&src, "sm_75", 64);
+        let ampere = emit_with(&src, "sm_80", 64);
         assert!(!turing.contains("nvgpu.device_async_copy"), "{fmt}");
         assert!(shared_bytes(&ampere) <= 48 * 1024, "{fmt}");
         // The two IQ2 formats with the largest tables keep one stage.
@@ -229,12 +229,12 @@ fn a_q8_weight_held_as_planes_stages_like_a_grouped_one() {
     // on both operands, the wide shape and the double-buffered activation
     // from sm_80.
     let src = q8_qgemm_src("256, 2");
-    let turing = emit_mlir_sync(&src, "sm_75");
+    let turing = emit_with(&src, "sm_75", 64);
     assert_contains(&turing, &["nvgpu.ldmatrix", "nvgpu.mma.sync", "mmaShape = [8, 8, 16]", "iter_args"]);
     assert!(!turing.contains("arith.extf"), "{turing}");
     // Both operand tiles and the two scale planes, nothing more.
     assert_eq!(turing.matches("memref.view").count(), 4, "{turing}");
-    let ampere = emit_mlir_sync(&src, "sm_80");
+    let ampere = emit_with(&src, "sm_80", 64);
     assert!(ampere.contains("mmaShape = [16, 8, 32]"), "{ampere}");
     assert_eq!(ampere.matches("nvgpu.device_async_copy").count(), 8, "{ampere}");
     assert!(shared_bytes(&ampere) <= 48 * 1024);

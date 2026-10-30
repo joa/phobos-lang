@@ -53,7 +53,7 @@ fn tensorcore_matmul_uses_wmma() {
 #[test]
 fn tensorcore_uses_mma_sync_on_sm75() {
     // With 64-bit indices, bare @tensorcore takes the mma.sync path.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -69,6 +69,7 @@ fn tensorcore_uses_mma_sync_on_sm75() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
         "sm_75",
+        64,
     );
     assert_contains(
         &mlir,
@@ -110,7 +111,7 @@ fn tensorcore_uses_mma_sync_on_sm75() {
 #[test]
 fn tensorcore_sync_widens_k_to_16_on_sm80() {
     // Ampere+ has the m16n8k16 shape, half the k-steps of Turing's k8.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore(sync)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -126,6 +127,7 @@ fn tensorcore_sync_widens_k_to_16_on_sm80() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
         "sm_80",
+        64,
     );
     assert_contains(
         &mlir,
@@ -144,7 +146,7 @@ fn tensorcore_sync_widens_k_to_16_on_sm80() {
 fn tensorcore_sync_f16_accumulator() {
     // The gemm_fp16.ph shape: f16 inputs and an f16 accumulator, carried
     // as a vector<2x2xf16> C/D fragment.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore(sync)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -160,6 +162,7 @@ fn tensorcore_sync_f16_accumulator() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
         "sm_75",
+        64,
     );
     assert_contains(
         &mlir,
@@ -180,7 +183,7 @@ fn tensorcore_sync_f16_accumulator() {
 fn tensorcore_wmma_optout_forces_legacy() {
     // @tensorcore(wmma) forces WMMA even with 64-bit indices, where
     // mma.sync would otherwise be picked.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore(wmma)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -196,6 +199,7 @@ fn tensorcore_wmma_optout_forces_legacy() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
         "sm_75",
+        64,
     );
     assert!(
         mlir.contains("subgroup_mma") && !mlir.contains("nvgpu.mma.sync"),
@@ -333,7 +337,7 @@ fn tensorcore_bails_to_vector_path_when_shape_does_not_fragment() {
         "WMMA emitted for a non-fragmenting shape:\n{mlir}"
     );
     // Pre-Volta chips have no tensor cores, so @tensorcore is ignored.
-    let old = emit_mlir_on(&src.replace("TILE_K in [8]", "TILE_K in [16]"), "sm_60");
+    let old = emit_with(&src.replace("TILE_K in [8]", "TILE_K in [16]"), "sm_60", 32);
     assert_contains(&old, &["vector.contract"]);
     assert!(
         !old.contains("subgroup_mma"),
@@ -343,7 +347,6 @@ fn tensorcore_bails_to_vector_path_when_shape_does_not_fragment() {
 
 #[test]
 fn tensorcore_widens_to_mma_sync_on_every_chip() {
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
     // The device path compiles at 32-bit indices, and a `@tensorcore` module
     // widens itself to 64 for mma.sync and ldmatrix on any chip;
     // `@tensorcore(wmma)` stays on WMMA.
@@ -361,13 +364,7 @@ fn tensorcore_widens_to_mma_sync_on_every_chip() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    let ptx = |chip: &str, src: &str| {
-        let ctx = BaseContext {
-            gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-            ..Default::default()
-        };
-        crate::compile(&ctx, src).expect("compiles")
-    };
+    let ptx = |chip: &str, src: &str| crate::compile(&base(chip, 32), src).expect("compiles");
     let ada = ptx("sm_89", src);
     assert!(ada.contains("mma.sync.aligned.m16n8k16"), "sm_89 should take mma.sync");
     assert!(ada.contains("ldmatrix"), "sm_89 should read fragments with ldmatrix");

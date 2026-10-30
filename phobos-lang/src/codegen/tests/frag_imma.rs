@@ -55,8 +55,8 @@ fn scaled_int8_accumulator_rides_in_registers() {
     let src = projection(128, 64, 128, ALIGNED, "ws * da");
     for (mlir, shape, mmas) in [
         (emit_mlir(&src), "mmaShape = [8, 8, 16]", 64),
-        (emit_mlir_sync(&src, "sm_86"), "mmaShape = [16, 8, 32]", 16),
-        (emit_mlir_sync(&src, "sm_120"), "mmaShape = [16, 8, 32]", 16),
+        (emit_with(&src, "sm_86", 64), "mmaShape = [16, 8, 32]", 16),
+        (emit_with(&src, "sm_120", 64), "mmaShape = [16, 8, 32]", 16),
     ] {
         assert!(
             !mlir.contains("memref.global"),
@@ -85,7 +85,7 @@ fn a_single_k_step_pairs_row_tiles_on_blackwell() {
     acc += f32(dot_t(a1, w1)) * ws * da
 ",
     );
-    let mlir = emit_mlir_sync(&src, "sm_120");
+    let mlir = emit_with(&src, "sm_120", 64);
     assert_eq!(mlir.matches("mmaShape = [16, 8, 16]").count(), 32, "{mlir}");
     assert!(!mlir.contains("mmaShape = [8, 8, 16]"), "{mlir}");
     assert_eq!(mlir.matches("math.fma").count(), 128, "{mlir}");
@@ -209,13 +209,13 @@ fn a_shared_operand_loads_by_ldmatrix() {
     // ldmatrix.x4 per 16 elements of k: nvgpu's op at 64-bit indices, nvvm's
     // on the shared address at 32, where nvgpu's does not lower.
     let src = staged_slices(1);
-    assert!(emit_mlir_sync(&src, "sm_75").contains("nvgpu.ldmatrix"));
+    assert!(emit_with(&src, "sm_75", 64).contains("nvgpu.ldmatrix"));
     let narrow = emit_mlir(&src);
     assert!(narrow.contains("nvvm.ldmatrix"), "{narrow}");
     assert!(narrow.contains("math.fma"), "{narrow}");
     // An ldmatrix quad holds four row tiles at one k step, not m16n8k32's
     // operand, so where m8n8k16 is native the shape stays narrow.
-    let ampere = emit_mlir_sync(&src, "sm_86");
+    let ampere = emit_with(&src, "sm_86", 64);
     assert!(ampere.contains("mmaShape = [8, 8, 16]") && !ampere.contains("mmaShape = [16, 8, 32]"), "{ampere}");
 }
 

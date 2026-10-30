@@ -53,7 +53,7 @@ fn bf16_is_emulated_below_ampere_and_native_from_ampere() {
             C[0 :+ 32, p * 32 :+ 32] = a * 2.0
         }";
     for chip in ["sm_75", "sm_80"] {
-        assert_contains(&emit_mlir_on(src, chip), &["arith.truncf", "bf16"]);
+        assert_contains(&emit_with(src, chip, 32), &["arith.truncf", "bf16"]);
     }
 }
 

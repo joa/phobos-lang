@@ -53,8 +53,8 @@ fn shared_bytes(mlir: &str) -> i64 {
 
 #[test]
 fn tiles_the_scaled_dot_reads_are_swizzled_unpadded() {
-    let on = emit_mlir_sync(&projection("@pipeline\n@padstage", ""), "sm_75");
-    let off = emit_mlir_sync(&projection("@pipeline\n@padstage\n@swizzle(off)", ""), "sm_75");
+    let on = emit_with(&projection("@pipeline\n@padstage", ""), "sm_75", 64);
+    let off = emit_with(&projection("@pipeline\n@padstage\n@swizzle(off)", ""), "sm_75", 64);
     assert!(on.matches("arith.xori").count() > off.matches("arith.xori").count(), "{on}");
     // The stage's pad goes with the swizzle: 128-byte rows, not 144.
     assert_eq!(shared_bytes(&off) - shared_bytes(&on), 64 * 16);
@@ -63,7 +63,7 @@ fn tiles_the_scaled_dot_reads_are_swizzled_unpadded() {
 
 #[test]
 fn swizzle_insists_or_fails_with_the_reason() {
-    assert!(emit_mlir_sync(&projection("@swizzle", ""), "sm_75").contains("ldmatrix"));
+    assert!(emit_with(&projection("@swizzle", ""), "sm_75", 64).contains("ldmatrix"));
     // A plain copy out of the tile would read it unpermuted.
     let e = emit_err(&projection("@swizzle(on)", "    E[pn * 64 :+ 64, kt :+ 128] = w\n"));
     assert!(e.contains("cannot swizzle tile `w`"), "{e}");

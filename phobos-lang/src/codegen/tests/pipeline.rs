@@ -52,13 +52,7 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
     let src = ROWSUM;
     // cp.async also needs 64-bit index lowering, since upstream's
     // convert-nvgpu-to-nvvm hardcodes a 64-bit converter.
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    let base = BaseContext {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
-        index_bitwidth: 64,
-        ..Default::default()
-    };
-    let mlir = emit_mlir_base(src, &base);
+    let mlir = emit_with(src, "sm_80", 64);
     assert_contains(
         &mlir,
         &[
@@ -73,7 +67,7 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
         !plain.contains("nvgpu."),
         "cp.async leaked into a non-sm_80 target:\n{plain}"
     );
-    let narrow = emit_mlir_on(src, "sm_80");
+    let narrow = emit_with(src, "sm_80", 32);
     assert!(
         !narrow.contains("nvgpu."),
         "cp.async leaked into a 32-bit-index module:\n{narrow}"
@@ -82,16 +76,11 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
 
 #[test]
 fn only_a_module_that_copies_asynchronously_widens_on_sm_80() {
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    let on = |chip: &str| BaseContext {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-        ..Default::default()
-    };
     let staged = crate::parse(ROWSUM).unwrap();
-    assert!(crate::needs_wide_index(&on("sm_80"), &staged));
-    assert!(!crate::needs_wide_index(&on("sm_75"), &staged));
+    assert!(crate::needs_wide_index(&base("sm_80", 32), &staged));
+    assert!(!crate::needs_wide_index(&base("sm_75", 32), &staged));
     let plain = crate::parse("kernel k(A: tensor<f32>[N]) { A[ctx.block.x] = 1.0 }").unwrap();
-    assert!(!crate::needs_wide_index(&on("sm_80"), &plain));
+    assert!(!crate::needs_wide_index(&base("sm_80", 32), &plain));
 }
 
 #[test]
@@ -114,13 +103,7 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    let base = BaseContext {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
-        index_bitwidth: 64,
-        ..Default::default()
-    };
-    let mlir = emit_mlir_base(src, &base);
+    let mlir = emit_with(src, "sm_80", 64);
     assert_contains(
         &mlir,
         &[
@@ -141,7 +124,7 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
         "cp.async leaked into a non-sm_80 target"
     );
     assert!(
-        !emit_mlir_on(src, "sm_80").contains("nvgpu."),
+        !emit_with(src, "sm_80", 32).contains("nvgpu."),
         "cp.async leaked into a 32-bit-index module"
     );
 }
@@ -348,11 +331,7 @@ fn a_dynshared_kernel_pipelines_past_the_static_ceiling() {
             }}"
         )
     };
-    use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
-    let ctx = Context {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
-        ..Context::default()
-    };
+    let ctx = base("sm_80", 32);
     let fails = |attrs: &str| crate::compile_raw(&ctx, &src(attrs)).unwrap().pipeline_failures;
     let static_fails = fails("");
     assert!(
@@ -376,16 +355,11 @@ fn a_dynamic_extent_pipelines_its_whole_tiles() {
             }
             C[0 :+ 64, 0 :+ 32] = acc
         }";
-    use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
-    let ctx = Context {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
-        ..Context::default()
-    };
-    let out = crate::compile_raw(&ctx, src).unwrap();
+    let out = crate::compile_raw(&base("sm_80", 32), src).unwrap();
     assert!(out.pipeline_failures.is_empty(), "{:?}", out.pipeline_failures);
     // The remainder stages into the loop's buffers: the accumulator and
     // four 8 KiB stages, not two more beside them.
-    assert_eq!(shared_bytes(&emit_mlir_on(src, "sm_80")), 40960);
+    assert_eq!(shared_bytes(&emit_with(src, "sm_80", 32)), 40960);
 }
 
 /// A gemm k-loop over `elem` tiles, with `attrs` above the kernel.
@@ -414,7 +388,7 @@ fn a_gemm_double_buffers_without_the_attribute() {
     let mlir = emit_mlir(&gemm("", "f32", 16));
     assert_eq!(tile_views(&mlir, "16x64xf32").len(), 4, "two staging pairs, doubled:\n{mlir}");
     // On the tensor cores at sm_80 the doubled stages stream through cp.async.
-    let mlir = emit_mlir_sync(&gemm("@tensorcore", "f16", 16), "sm_80");
+    let mlir = emit_with(&gemm("@tensorcore", "f16", 16), "sm_80", 64);
     assert_contains(&mlir, &["nvgpu.device_async_copy", "nvgpu.device_async_wait"]);
 }
 
@@ -422,7 +396,7 @@ fn a_gemm_double_buffers_without_the_attribute() {
 fn pipeline_off_keeps_one_staging_pair() {
     let mlir = emit_mlir(&gemm("@pipeline(off)", "f32", 16));
     assert_eq!(tile_views(&mlir, "16x64xf32").len(), 2, "one staging pair:\n{mlir}");
-    let mlir = emit_mlir_sync(&gemm("@pipeline(off)\n        @tensorcore", "f16", 16), "sm_80");
+    let mlir = emit_with(&gemm("@pipeline(off)\n        @tensorcore", "f16", 16), "sm_80", 64);
     assert!(!mlir.contains("nvgpu.device_async"), "cp.async under @pipeline(off):\n{mlir}");
 }
 
@@ -466,6 +440,6 @@ fn lanes_read_a_staged_tile_the_loop_pipelines() {
                 Y[0, row] = total
             }
         }";
-    let mlir = emit_mlir_sync(src, "sm_80");
+    let mlir = emit_with(src, "sm_80", 64);
     assert_contains(&mlir, &["nvgpu.device_async_copy"]);
 }

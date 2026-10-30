@@ -39,7 +39,7 @@ fn a_generated_weight_feeds_the_fragments_with_no_shared_tile() {
     let src = projection("    acc += f32(dot_t(a, w)) * ws * da\n");
     for (mlir, shape, mmas) in [
         (emit_mlir(&src), "mmaShape = [8, 8, 16]", 64),
-        (emit_mlir_sync(&src, "sm_120"), "mmaShape = [16, 8, 32]", 16),
+        (emit_with(&src, "sm_120", 64), "mmaShape = [16, 8, 32]", 16),
     ] {
         assert!(!mlir.contains("memref.global"), "{mlir}");
         assert!(!mlir.contains("gpu.barrier"), "{mlir}");

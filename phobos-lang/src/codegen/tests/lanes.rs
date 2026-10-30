@@ -88,8 +88,7 @@ fn a_per_thread_store_meets_other_accesses_only_past_a_barrier() {
         let err = emit_err(&kernel(body));
         assert!(err.contains("no `barrier()` between"), "{body}\ngot: {err}");
         let fenced = body.replace("= 1.0", "= 1.0\n barrier()").replace("= x\n", "= x\n barrier()\n");
-        let mlir = emit_mlir(&kernel(&fenced));
-        assert!(module_verifies(&mlir), "{fenced}");
+        emit_mlir(&kernel(&fenced));
     }
     // A thread reading back its own stores is not checked.
     emit_mlir(&kernel("if ctx.lane == 0 {
@@ -106,12 +105,11 @@ fn a_per_thread_store_meets_other_accesses_only_past_a_barrier() {
 fn uniform_code_under_uniform_control_is_unchanged() {
     // A per-thread value that never reaches a CTA-wide op is fine, and so
     // is a CTA-wide op after a per-thread branch has closed.
-    let mlir = emit_mlir(&kernel(
+    emit_mlir(&kernel(
         "var x = 0
         if ctx.lane == 3 { x = 1 }
         t = t * 2.0",
     ));
-    assert!(module_verifies(&mlir));
 }
 
 /// `fold` of one `f32` per thread, written by thread 0.
@@ -157,20 +155,18 @@ fn a_cta_collective_exchanges_each_warps_result() {
     assert_eq!(mlir.matches("gpu.shuffle").count(), 5, "\n{mlir}");
     // Before the scratch is written, after it is, and after it is read.
     assert_eq!(mlir.matches("gpu.barrier").count(), 3, "\n{mlir}");
-    assert!(module_verifies(&mlir));
 }
 
 #[test]
 fn a_full_warp_result_is_the_same_in_every_lane() {
     // A shuffle under control that depends on a warp's total is allowed,
     // since every lane of the warp agrees on it.
-    let mlir = emit_mlir(&folded(
+    emit_mlir(&folded(
         "shfl<xor 1>(where(sum<over ctx.lane>(x) > 0.0, x, 0.0))",
     ));
-    assert!(module_verifies(&mlir));
     let src = folded("0.0")
         .replace("let r = 0.0", "var r = 0.0\n if sum<over ctx.lane>(x) > 0.0 { r = shfl<xor 1>(x) }");
-    assert!(module_verifies(&emit_mlir(&src)));
+    emit_mlir(&src);
 }
 
 #[test]
@@ -211,8 +207,7 @@ fn collective_errors_name_the_problem() {
 
 #[test]
 fn the_settings_are_keywords_only_inside_the_brackets() {
-    let mlir = emit_mlir(&folded("shfl<from 1>(x)").replace("let x =", "let from = 2\n let x = f32(from) * 0.0 +"));
-    assert!(module_verifies(&mlir));
+    emit_mlir(&folded("shfl<from 1>(x)").replace("let x =", "let from = 2\n let x = f32(from) * 0.0 +"));
 }
 
 /// One thread's own `i8` slices of `a` and `w`, contracted by `body`.

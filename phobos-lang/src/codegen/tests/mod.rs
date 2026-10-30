@@ -36,35 +36,26 @@ mod unsigned;
 
 use melior::ir::{Location, Module, operation::OperationLike};
 
+/// The context that compiles for `chip` at `index_bits`-bit indices. The
+/// mma.sync path and cp.async want 64.
+fn base(chip: &str, index_bits: u32) -> phobos_base::context::Context {
+    use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+    Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
+        index_bitwidth: index_bits,
+        ..Context::default()
+    }
+}
+
 fn emit_mlir(src: &str) -> String {
-    emit_mlir_on(src, "sm_75")
+    emit_with(src, "sm_75", 32)
 }
 
-fn emit_mlir_on(src: &str, chip: &str) -> String {
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    emit_mlir_base(
-        src,
-        &BaseContext {
-            gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-            ..Default::default()
-        },
-    )
+fn emit_with(src: &str, chip: &str, index_bits: u32) -> String {
+    emit_mlir_base(src, &base(chip, index_bits))
 }
 
-/// Like [`emit_mlir_on`] but with 64-bit index lowering, which the
-/// `@tensorcore` mma.sync path requires.
-fn emit_mlir_sync(src: &str, chip: &str) -> String {
-    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    emit_mlir_base(
-        src,
-        &BaseContext {
-            gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-            index_bitwidth: 64,
-            ..Default::default()
-        },
-    )
-}
-
+/// The module `src` emits under `base`, which must verify.
 fn emit_mlir_base(src: &str, base: &phobos_base::context::Context) -> String {
     dump_source(src);
     let context = phobos_mlir::context();
@@ -90,12 +81,6 @@ fn dump_source(src: &str) {
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("test_{:016x}.ph", h.finish())), src).unwrap();
-}
-
-/// `emit_mlir` already verifies. This only names the intent of a test that
-/// cares about validity alone.
-fn module_verifies(mlir: &str) -> bool {
-    !mlir.is_empty()
 }
 
 fn assert_contains(mlir: &str, needles: &[&str]) {

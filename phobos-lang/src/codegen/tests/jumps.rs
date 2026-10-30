@@ -1,7 +1,6 @@
 // `break`, `continue` and `return`, which the parser lowers to uniform flags.
 
 use super::*;
-use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 
 /// A search loop: the first `i` with `A[i] > t`, written to `O[0]`.
 const FIND: &str = "
@@ -81,13 +80,8 @@ fn a_kernel_without_jumps_is_untouched() {
 
 #[test]
 fn flags_reach_ptx() {
-    for (chip, index_bitwidth) in [("sm_75", 32), ("sm_120", 64)] {
-        let ctx = Context {
-            gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-            index_bitwidth,
-            ..Context::default()
-        };
-        let code = crate::compile_raw(&ctx, FIND).unwrap().code;
+    for (chip, index_bits) in [("sm_75", 32), ("sm_120", 64)] {
+        let code = crate::compile_raw(&base(chip, index_bits), FIND).unwrap().code;
         assert!(code.contains(".entry find"), "{chip}:\n{code}");
     }
 }

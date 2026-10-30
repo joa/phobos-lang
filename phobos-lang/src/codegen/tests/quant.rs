@@ -31,7 +31,7 @@ fn i8_dot_t_uses_the_hardware_four_way_dot() {
 #[test]
 fn i8_dot_t_falls_back_below_pascal() {
     // dp4a needs Pascal. Older targets take the generic integer path.
-    let mlir = emit_mlir_on(I8_DOT_T, "sm_50");
+    let mlir = emit_with(I8_DOT_T, "sm_50", 32);
     assert!(
         !mlir.contains("nvvm.dot.accumulate.4way"),
         "sm_50 has no dp4a:\n{mlir}"
@@ -83,7 +83,7 @@ fn a_single_row_i8_dot_t_stays_on_dp4a() {
 #[test]
 fn i8_dot_t_falls_back_below_turing() {
     // Integer tensor cores need Turing. Pascal and Volta use dp4a.
-    let mlir = emit_mlir_on(I8_DOT_T_TILED, "sm_70");
+    let mlir = emit_with(I8_DOT_T_TILED, "sm_70", 32);
     assert!(
         !mlir.contains("nvgpu.mma.sync"),
         "sm_70 has no integer tensor cores:\n{mlir}"
@@ -140,16 +140,8 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
 #[test]
 fn qmma_t_needs_whole_tensor_core_tiles() {
     // 8x8 tensor-core outputs need tile dims that are multiples of 8.
-    let src = Q8_QMMA.replace("TN in [64]", "TN in [12]");
-    let context = phobos_mlir::context();
-    let module = Module::new(Location::unknown(&context));
-    let kernels = crate::parse(&src).unwrap();
-    let base = phobos_base::context::Context::default();
-    let err = crate::codegen::emit(&base, &kernels, &context, &module).unwrap_err();
-    assert!(
-        err.to_string().contains("multiple of 8"),
-        "unexpected error: {err}"
-    );
+    let err = emit_err(&Q8_QMMA.replace("TN in [64]", "TN in [12]"));
+    assert!(err.contains("multiple of 8"), "unexpected error: {err}");
 }
 
 #[test]
@@ -287,16 +279,8 @@ fn iq1s_qmma_t_writes_no_expanded_weight() {
 fn iq1s_qmma_t_needs_whole_tensor_core_tiles() {
     // 8x8 tensor-core outputs need tile dims that are multiples of 8. `k` is
     // dynamic, so the host's `raw_qmma_eligible` promises whole 256-blocks.
-    let src = IQ1S_QMMA.replace("TN in [64]", "TN in [12]");
-    let context = phobos_mlir::context();
-    let module = Module::new(Location::unknown(&context));
-    let kernels = crate::parse(&src).unwrap();
-    let base = phobos_base::context::Context::default();
-    let err = crate::codegen::emit(&base, &kernels, &context, &module).unwrap_err();
-    assert!(
-        err.to_string().contains("multiple of 8"),
-        "unexpected error: {err}"
-    );
+    let err = emit_err(&IQ1S_QMMA.replace("TN in [64]", "TN in [12]"));
+    assert!(err.contains("multiple of 8"), "unexpected error: {err}");
 }
 
 const Q50_QDOT: &str = "@launch(256)
