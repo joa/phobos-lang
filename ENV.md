@@ -56,7 +56,6 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_STATE_ARENA` | opt-in | off | A sequence's recurrent state goes into an arena of its own, reset when the sequence ends. |
 | `PHOBOS_SLAB_MIB` | MiB | 128 | Arena slab size. A tensor larger than a slab gets one to itself, which is how the output head can be evicted on its own. |
 | `PHOBOS_DEQUANT_MIB` | MiB | 32 | Budget of the strip a prompt pass dequantizes a raw-format weight into, for formats without a fused projection. Smaller buys residency and costs launches. |
-| `PHOBOS_DENSE_SCRATCH` | opt-out | on | The prompt pass's dense scratch is one shared allocation for the whole model rather than one per weight. |
 | `PHOBOS_TRIM` | opt-in | off | After a prompt pass, hand the dense scratch and the pool's free list back to the driver at the next pass boundary. |
 
 ## The device backend: kernel selection
