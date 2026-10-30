@@ -139,10 +139,6 @@ impl DeviceBackend {
 
             n0 += cur;
         }
-        if !self.dense_scratch_shared {
-            self.release(scratch_out);
-            self.release(scratch_w);
-        }
         Ok(())
     }
     /// [`super::DeviceBackend::matmul`]'s ladder over an f16 weight. The

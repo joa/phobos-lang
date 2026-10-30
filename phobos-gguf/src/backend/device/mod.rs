@@ -489,10 +489,8 @@ pub struct DeviceBackend {
     raw_qmma_formats: Vec<Quant>,
     /// The staged prompt projections. See `qmma_raw.rs`.
     qgemm: qmma_raw::Qgemm,
-    /// `PHOBOS_DENSE_SCRATCH=0` uses a pooled scratch pair per weight
-    /// instead of one shared pair. `PHOBOS_TRIM=1` also frees the scratch
-    /// and the pool's free list after a dense pass. See `residency.rs`.
-    dense_scratch_shared: bool,
+    /// `PHOBOS_TRIM=1` frees the dense scratch and the pool's free list
+    /// after a dense pass. See `residency.rs`.
     trim_after_dense: bool,
     /// The other IQ formats' grids, packed like IQ1_S's. IQ2_XS and IQ3_XXS
     /// read IQ2_XXS's signs, IQ3_S reads IQ2_S's.

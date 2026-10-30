@@ -267,7 +267,6 @@ impl DeviceBackend {
             raw_qmma: Cell::new(env_flag_on("PHOBOS_RAW_QMMA")),
             raw_qmma_formats: qmma_formats(),
             qgemm: qmma_raw::Qgemm::from_env(),
-            dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
             trim_after_dense: env_flag("PHOBOS_TRIM"),
             iq2xxs_grid_packed,
             iq2s_grid_packed,
