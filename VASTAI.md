@@ -11,7 +11,6 @@ first and tear the instance down the moment the run is over.
 ### Setup
 
 ```powershell
-$env:PATH="C:\Users\joaeb\AppData\Local\Python\pythoncore-3.14-64\Scripts;$env:PATH"
 vastai show user        # credit
 vastai show instances   # must be empty before and after a session
 ```
@@ -110,7 +109,7 @@ lists the kernels the box had to compile. Its log lands in `/root/smoke.log`.
 
 ```powershell
 scp -P PORT scripts/vastai_smoke.sh root@HOST:/root/
-ssh -p PORT root@HOST "touch ~/.no_auto_tmux; bash /root/vastai_smoke.sh v0.1.1"
+ssh -p PORT root@HOST "touch ~/.no_auto_tmux; bash /root/vastai_smoke.sh TAG"
 scp -P PORT root@HOST:/root/smoke.log results/
 ```
 
@@ -138,49 +137,6 @@ them. They cost the first load about 40 s instead of 0.5 s and nothing after. If
 long, or a single compile runs for minutes, the cache wants rewarming: destroy
 the instance, warm on the workstation with `phobos-cache warm` (no GPU
 needed), and come back with the new package.
-
-### Benchmark against llama.cpp
-
-`scripts/vastai_bench.sh` runs `scripts/bench.py` on the box: Phobos from a
-release package (`--phobos-bench`, so the binary stays beside its
-`kernel-cache/`) against a pinned llama.cpp Linux CUDA build, interleaved, with
-the card checked for contention. Not yet run on a rented card.
-
-- **Phobos:** the v0.1.1 package with the RTX 5090 fix laid over it. The
-  overlay is `target/dist/v0.1.1-fix/overlay.tar.xz` (`phobos-cli` and
-  `phobos-bench`, mode 755) with its `overlay.sha256`. It keeps v0.1.1's
-  compiler fingerprint, so the shipped cache applies. The CI run it came from
-  is 37769033303.
-- **llama.cpp:** `b11497`, the `ubuntu-cuda-12.8-x64` build plus its `cudart`
-  libraries in the same directory (both binaries carry `RUNPATH $ORIGIN`).
-  The build BENCHMARKS.md used, 10636, has no Linux CUDA asset. CUDA 12.8 sits
-  well inside the R580 and R595 drivers these hosts run.
-- **Models:** HuggingFace `REPO/FILE`, fetched on the box. bench.py's default
-  three come to 4.7 GB:
-  `ggml-org/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf`,
-  `Abiray/MiniCPM5-1B-GGUF/minicpm5-1b-Q8_0.gguf`,
-  `unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-Q4_K_M.gguf`.
-  `unsloth/GLM-4.6V-Flash-GGUF/GLM-4.6V-Flash-Q4_K_M.gguf` and
-  `unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ1_M.gguf` add 12.9 GB. Rent
-  `--disk 40` for those.
-
-The fetch runs while the overlay uploads:
-
-```powershell
-scp -P PORT scripts/vastai_bench.sh scripts/bench.py root@HOST:/root/
-ssh -p PORT root@HOST "nohup bash /root/vastai_bench.sh fetch ggml-org/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf Abiray/MiniCPM5-1B-GGUF/minicpm5-1b-Q8_0.gguf unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-Q4_K_M.gguf > /root/fetch.log 2>&1 < /dev/null &"
-scp -P PORT target/dist/v0.1.1-fix/overlay.tar.xz target/dist/v0.1.1-fix/overlay.sha256 root@HOST:/root/
-ssh -p PORT root@HOST "until [ -f /root/bench/fetch.done ]; do sleep 5; done; bash /root/vastai_bench.sh run"
-scp -P PORT -r root@HOST:/root/results results/vastai/bench-CARD
-```
-
-`run` passes anything after it to bench.py, for instance `-R 3` or `--force`.
-Before `--force`, look at the idle readings at the top of `bench.log`: the
-first RTX 5090 host reported 100% utilization with 2 MiB in use and no
-processes. That is the reporting, not a tenant, and it is the one case
-`--force` is for. `run` loads each model once before bench.py starts,
-so the card's persistent kernels compile outside the timed rounds and a model
-that does not load stops the run within a minute.
 
 ### The platforms page
 

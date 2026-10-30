@@ -32,27 +32,8 @@ import matplotlib.pyplot as plt
 # Fixed, so the element ids in an SVG are stable across runs.
 matplotlib.rcParams["svg.hashsalt"] = "phobos-bench"
 
-# Same palette as scripts/plot.py, so the two charts read as one family.
-THEMES = {
-    "light": {
-        "surface": "#fcfcfb",
-        "primary": "#0b0b0b",
-        "secondary": "#52514e",
-        "muted": "#898781",
-        "grid": "#e1e0d9",
-        "axis": "#c3c2b7",
-        "series": ["#2a78d6", "#eb6834"],
-    },
-    "dark": {
-        "surface": "#1a1a19",
-        "primary": "#ffffff",
-        "secondary": "#c3c2b7",
-        "muted": "#898781",
-        "grid": "#2c2c2a",
-        "axis": "#383835",
-        "series": ["#3987e5", "#d95926"],
-    },
-}
+# plot.py's palette, so the two charts read as one family.
+from plot import THEMES  # noqa: E402
 
 # Colors fixed per implementation in every theme. cuBLAS is a vendor library,
 # so it gets NVIDIA's brand green instead of a palette color.
