@@ -53,11 +53,14 @@ fn main() -> Result<()> {
         // distribution's shape and the chosen token.
         let spread = want.iter().fold(f32::MIN, |a, &b| a.max(b))
             - want.iter().fold(f32::MAX, |a, &b| a.min(b));
+        // `total_cmp` ranks NaN above every number: a NaN error is the worst one,
+        // where `f32::max` would drop it.
         let worst = want
             .iter()
             .zip(&got)
             .map(|(w, g)| (w - g).abs())
-            .fold(0.0f32, f32::max);
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
         let error = worst / spread;
         let host_top = argmax(&want);
         let gpu_top = argmax(&got);
@@ -72,7 +75,7 @@ fn main() -> Result<()> {
         );
         // 2e-2 sits above where accumulated rounding over two dozen blocks
         // lands, so only a real defect crosses it.
-        if error > 2e-2 || (decisive && host_top != gpu_top) {
+        if error.is_nan() || error > 2e-2 || (decisive && host_top != gpu_top) {
             println!("  host[..8] {:?}", &want[..8]);
             println!("  gpu [..8] {:?}", &got[..8]);
             bail!("backends disagree at step {step}");

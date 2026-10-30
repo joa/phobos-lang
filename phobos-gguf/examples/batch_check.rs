@@ -136,11 +136,14 @@ fn report(name: &str, what: &str, reference: &[f32], got: &[f32]) -> Result<bool
 
     let spread = serial.iter().copied().fold(f32::NEG_INFINITY, f32::max)
         - serial.iter().copied().fold(f32::INFINITY, f32::min);
+    // `total_cmp` ranks NaN above every number: a NaN error is the worst one,
+    // where `f32::max` would drop it.
     let error = batched
         .iter()
         .zip(serial)
         .map(|(b, s)| (b - s).abs())
-        .fold(0.0f32, f32::max)
+        .max_by(f32::total_cmp)
+        .unwrap_or(0.0)
         / spread.max(1.0);
     let argmax = |v: &[f32]| {
         v.iter()

@@ -102,10 +102,11 @@ fn row(dense: &[f32], j: usize, c: usize) -> &[f32] {
     slot_row(dense, TABLE[j], c)
 }
 
-/// The largest difference over the reference's RMS.
+/// The largest difference over the reference's RMS, NaN if any difference
+/// is: `total_cmp` ranks it above every number.
 fn relative(got: &[f32], want: &[f32]) -> f32 {
     let rms = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
-    got.iter().zip(want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max) / rms
+    got.iter().zip(want).map(|(g, w)| (g - w).abs()).max_by(f32::total_cmp).unwrap_or(0.0) / rms
 }
 
 fn report(failures: &Cell<u32>, label: &str, err: f32) {
