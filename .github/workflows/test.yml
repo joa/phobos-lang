@@ -5,7 +5,8 @@
 #   the chat rendering, the sampler and the source size cap. These link no
 #   LLVM or MLIR, so they build with Rust alone.
 # - compiler: the parser and codegen tests (MLIR verifier, UI goldens, the
-#   race check over every .ph in the tree) and the cluster planner. These
+#   race check over every .ph in the tree), the compiled-kernel cache and
+#   manifest (phobos-kernels' `compiler` feature) and the cluster planner. These
 #   link LLVM and MLIR, so they take the toolchain release.yml builds with.
 #
 # Left out because they link the CUDA driver at build time or need a card
@@ -104,7 +105,8 @@ jobs:
         run: |
           cargo test --locked \
             -p phobos-lang -p phobos-mlir -p phobos-cluster \
-            -p phobos-sched -p phobos-compile -p phobos-cache 2>&1 | tee "$RUNNER_TEMP/test.log"
+            -p phobos-sched -p phobos-compile -p phobos-cache \
+            -p phobos-kernels --features phobos-kernels/compiler 2>&1 | tee "$RUNNER_TEMP/test.log"
 
       - name: Totals
         if: always()

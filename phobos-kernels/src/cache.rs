@@ -218,14 +218,14 @@ pub(crate) fn encode_one(ptx: &str, shared: &[(String, usize)]) -> Vec<u8> {
 
 pub(crate) fn decode_one(bytes: &[u8]) -> Option<(String, Vec<(String, usize)>)> {
     let mut r = Reader::new(bytes);
-    let shared_len = r.u32()? as usize;
-    let mut shared = Vec::with_capacity(shared_len);
-    for _ in 0..shared_len {
-        let name_len = r.u32()? as usize;
-        let name = r.utf8(name_len)?;
-        let value = r.u64()? as usize;
-        shared.push((name, value));
-    }
+    // Collected rather than sized up front: a corrupt entry's count would
+    // reserve gigabytes and abort the process before the read fails.
+    let shared = (0..r.u32()?)
+        .map(|_| {
+            let name_len = r.u32()? as usize;
+            Some((r.utf8(name_len)?, r.u64()? as usize))
+        })
+        .collect::<Option<Vec<_>>>()?;
     let ptx_len = r.u64()? as usize;
     Some((r.utf8(ptx_len)?, shared))
 }
