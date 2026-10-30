@@ -30,15 +30,16 @@ pub(super) fn leaf_context<'a>(chips: impl IntoIterator<Item = &'a str>) -> Cont
 
 /// Each leaf's PTX for `ctx`, as (hash, entry name, ptx) by kernel id.
 ///
-/// A leaf that needs 64-bit indices on the chip is refused: compiled at 32
-/// bits it would be wrong, and the pod cannot launch it wider.
+/// A leaf that needs 64-bit indices on the chip, or asks for them with
+/// `@index_bits(64)`, is refused: compiled at 32 bits it would be wrong, and
+/// the pod cannot launch it wider.
 pub(super) fn compile_leaves(program: &phobos_cluster::ir::ClusterProgram, ctx: &Context) -> Result<Vec<(String, String, String)>> {
     program
         .leaves
         .iter()
         .map(|l| {
             let kernel = std::slice::from_ref(&l.kernel);
-            if phobos_lang::needs_wide_index(ctx, kernel) {
+            if phobos_lang::index_bits(ctx, kernel)? > 32 {
                 bail!(
                     "leaf '{}' needs 64-bit indices on {}, which the pod's 32-bit launch ABI does not carry",
                     l.kernel.name,
@@ -54,7 +55,28 @@ pub(super) fn compile_leaves(program: &phobos_cluster::ir::ClusterProgram, ctx: 
 
 #[cfg(test)]
 mod tests {
-    use super::leaf_context;
+    use super::{compile_leaves, leaf_context};
+
+    #[test]
+    fn a_leaf_that_asks_for_64_bit_indices_is_refused() {
+        let src = r#"
+@index_bits(64)
+@cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
+kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+let pm = ctx.block.x
+let pn = ctx.block.y
+var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+for kt in range(0, K, TILE_K) {
+    acc += dot(A[pm * TILE_M :+ TILE_M, kt :+ TILE_K], B[kt :+ TILE_K, pn * TILE_N :+ TILE_N])
+}
+C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+}"#;
+        let kernel = phobos_lang::parse(src).unwrap().remove(0);
+        let program = phobos_cluster::compile(&kernel).unwrap();
+        let err = compile_leaves(&program, &leaf_context([])).unwrap_err().to_string();
+        assert!(err.contains("needs 64-bit indices"), "{err}");
+    }
 
     #[test]
     fn leaves_compile_for_the_oldest_node_at_32_bits() {
