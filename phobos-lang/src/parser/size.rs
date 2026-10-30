@@ -1,48 +1,19 @@
 // How many nodes a tree of the AST has, which bounds what inlining may build.
 
-use super::super::ast::{Expr, ExprKind, Stmt, Sub};
+use super::super::ast::{Expr, ExprKind, Stmt};
 
 pub(super) fn expr(e: &Expr) -> usize {
-    1 + match &e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Var(_) => 0,
-        ExprKind::Unary { rhs, .. } => expr(rhs),
-        ExprKind::Binary { lhs, rhs, .. } => expr(lhs) + expr(rhs),
-        ExprKind::Index { base, subs } => expr(base) + subs.iter().map(sub).sum::<usize>(),
-        ExprKind::Call { args, .. } => args.iter().map(expr).sum(),
+    let generated = match &e.kind {
         ExprKind::Generate(g) => block(&g.body) + expr(&g.value),
-    }
-}
-
-fn sub(s: &Sub) -> usize {
-    match s {
-        Sub::Point(e) | Sub::From(e) => expr(e),
-        Sub::Range { start: a, end: b } | Sub::Span { start: a, len: b } => expr(a) + expr(b),
-        Sub::Full => 0,
-    }
+        _ => 0,
+    };
+    1 + generated + e.kind.children().map(expr).sum::<usize>()
 }
 
 pub(super) fn block(body: &[Stmt]) -> usize {
-    body.iter().map(stmt).sum()
-}
-
-fn stmt(s: &Stmt) -> usize {
-    1 + match s {
-        Stmt::Let { value, .. } => expr(value),
-        Stmt::Var { value, .. } => value.as_ref().map_or(0, expr),
-        Stmt::Assign { target, value, .. } => expr(target) + expr(value),
-        Stmt::For { start, end, step, unroll, body, .. } => {
-            expr(start)
-                + expr(end)
-                + step.as_ref().map_or(0, expr)
-                + unroll.as_ref().map_or(0, expr)
-                + block(body)
-        }
-        Stmt::While { cond, body, .. } => expr(cond) + block(body),
-        Stmt::If { cond, then, r#else, .. } => {
-            expr(cond) + block(then) + r#else.as_deref().map_or(0, block)
-        }
-        Stmt::Expr(e, _) => expr(e),
-    }
+    body.iter()
+        .map(|s| 1 + s.exprs().map(expr).sum::<usize>() + s.blocks().map(block).sum::<usize>())
+        .sum()
 }
 
 #[cfg(test)]
