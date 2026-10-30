@@ -124,10 +124,6 @@ pub(crate) struct Build {
     scopes: Vec<HashMap<String, Binding>>,
     pub(crate) shape_env: BTreeMap<String, i64>,
     pub(crate) report: Report,
-    /// Per-dimension divisors of a slice's extents, carried from `@aligned`
-    /// through `Full` subscripts. Only the prescans read it, so it lives
-    /// here rather than on the type.
-    view_divs: HashMap<ValueId, Vec<i64>>,
     /// Loop-invariant dot operands staged in an enclosing loop's preheader,
     /// one frame per open loop: `(source view, staged buffer)`.
     pub(crate) hoisted: Vec<Vec<(ValueId, ValueId)>>,
@@ -256,7 +252,6 @@ pub fn build_cautious(
         scopes: Vec::new(),
         shape_env,
         report: Report::default(),
-        view_divs: HashMap::new(),
         hoisted: Vec::new(),
         ragged_iv: None,
         trimmed_ivs: Vec::new(),
@@ -582,15 +577,17 @@ impl Build {
         self.is_buffer(v) && self.ir.name(v).is_none()
     }
 
+    /// A known divisor of `v`'s extent `d`: a tensor's promise, or a
+    /// slice's, which carries it through a dimension taken whole.
     pub(crate) fn div_of(&self, v: ValueId, d: usize) -> i64 {
-        match self.ir.ty(v) {
-            Type::Tensor(t) => t.div.get(d).copied().unwrap_or(1),
-            _ => self.view_divs.get(&v).and_then(|ds| ds.get(d)).copied().unwrap_or(1),
-        }
-    }
-
-    pub(crate) fn set_view_divs(&mut self, v: ValueId, divs: Vec<i64>) {
-        self.view_divs.insert(v, divs);
+        let divs = match self.ir.ty(v) {
+            Type::Tensor(t) => &t.div,
+            _ => match self.ir.def_op(v).map(|op| self.ir.kind(op)) {
+                Some(OpKind::Slice(s)) => &s.divs,
+                _ => return 1,
+            },
+        };
+        divs.get(d).copied().unwrap_or(1)
     }
 
     // Types.

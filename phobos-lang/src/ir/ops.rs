@@ -213,8 +213,8 @@ pub struct Slice {
     pub sizes: Vec<Extent>,
     pub masked: Vec<bool>,
     /// Known divisor of each extent: the source's promise on a dimension
-    /// taken whole, 1 elsewhere. Only the build's prescans and its register
-    /// matmul match read it.
+    /// taken whole, 1 elsewhere. The build reads it through
+    /// `Build::div_of`, as it reads a tensor's; nothing after the build does.
     pub divs: Vec<i64>,
 }
 
