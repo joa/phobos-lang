@@ -555,7 +555,8 @@ impl<'c> Codegen<'c> {
         let needed_bytes = self.shared_bytes + 2 * stage_bytes;
         if needed_bytes > limit_bytes {
             self.pipeline_declines.push(format!(
-                "the gemm's doubled staging would need {needed_bytes} bytes of shared memory,                  over the {limit_bytes}-byte ceiling"
+                "the gemm's doubled staging would need {needed_bytes} bytes of shared memory, \
+                 over the {limit_bytes}-byte ceiling"
             ));
             return 1;
         }
