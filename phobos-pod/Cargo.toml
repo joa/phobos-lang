@@ -1,6 +1,6 @@
 [package]
 name = "phobos-pod"
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 description = "Executes scheduler instructions on one GPU"
 readme.workspace = true
@@ -17,8 +17,6 @@ phobos-cluster = { path = "../phobos-cluster" }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
-prost.workspace = true
-futures.workspace = true
 
 [dev-dependencies]
 phobos-lang = { path = "../phobos-lang" }

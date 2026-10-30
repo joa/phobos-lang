@@ -22,6 +22,7 @@ members = [
 codegen-units = 1
 
 [workspace.package]
+version = "0.3.0"
 edition = "2024"
 readme = "README.md"
 repository = "https://github.com/joa/phobos"
@@ -34,7 +35,6 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.12"
 tonic-build = "0.12"
 prost = "0.13"
-futures = "0.3"
 sha2 = "0.10"
 melior = "0.27.0"
 mlir-sys = "220.0.2"

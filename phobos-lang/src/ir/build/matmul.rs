@@ -196,7 +196,6 @@ impl Build {
                 Stmt::Let {
                     name: prev_load_name,
                     ty: None,
-                    value: _,
                     ..
                 },
                 Stmt::Assign {
