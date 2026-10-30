@@ -20,5 +20,4 @@ tonic.workspace = true
 
 [dev-dependencies]
 phobos-lang = { path = "../phobos-lang" }
-phobos-mlir = { path = "../phobos-mlir" }
 phobos-sched = { path = "../phobos-sched" }

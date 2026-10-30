@@ -1837,7 +1837,6 @@ dependencies = [
  "phobos-base",
  "phobos-cluster",
  "phobos-lang",
- "phobos-mlir",
  "phobos-sched",
  "tokio",
  "tokio-stream",

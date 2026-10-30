@@ -195,14 +195,13 @@ impl TileStore {
         }
     }
 
-    /// Record one peer serve and return the new serve count.
-    pub fn record_serve(&mut self, tile: TileId) -> Result<u32> {
-        let t = self
-            .tiles
+    /// Record one peer serve.
+    pub fn record_serve(&mut self, tile: TileId) -> Result<()> {
+        self.tiles
             .get_mut(&tile)
-            .ok_or_else(|| anyhow::anyhow!("serve of unknown tile {:#x}", tile.0))?;
-        t.serves += 1;
-        Ok(t.serves)
+            .ok_or_else(|| anyhow::anyhow!("serve of unknown tile {:#x}", tile.0))?
+            .serves += 1;
+        Ok(())
     }
 
     pub fn serves_satisfied(&self, tile: TileId) -> bool {

@@ -70,7 +70,6 @@ pub enum EngineMsg {
         hash: String,
         reply: oneshot::Sender<Option<String>>,
     },
-    Shutdown,
 }
 
 pub type EngineTx = mpsc::UnboundedSender<EngineMsg>;
@@ -110,10 +109,8 @@ pub struct Engine {
     fetching_kernel: HashSet<String>,
 
     completions: Vec<Completion>,
-    complete_sink: Option<mpsc::UnboundedSender<Completion>>,
-    fail_sink: Option<mpsc::UnboundedSender<(InstrId, String)>>,
-    idle: Option<oneshot::Sender<()>>,
-    had_work: bool,
+    complete_sink: mpsc::UnboundedSender<Completion>,
+    fail_sink: mpsc::UnboundedSender<(InstrId, String)>,
 }
 
 impl Engine {
@@ -121,9 +118,8 @@ impl Engine {
         rt: Handle,
         node_id: NodeId,
         arena_bytes: usize,
-        complete_sink: Option<mpsc::UnboundedSender<Completion>>,
-        fail_sink: Option<mpsc::UnboundedSender<(InstrId, String)>>,
-        idle: oneshot::Sender<()>,
+        complete_sink: mpsc::UnboundedSender<Completion>,
+        fail_sink: mpsc::UnboundedSender<(InstrId, String)>,
     ) -> Result<EngineTx> {
         let (tx, rx) = mpsc::unbounded_channel();
         let to_self = tx.clone();
@@ -144,7 +140,6 @@ impl Engine {
                 arena_bytes,
                 complete_sink,
                 fail_sink,
-                idle,
             ) {
                 Ok(e) => e,
                 Err(e) => {
@@ -164,9 +159,8 @@ impl Engine {
         to_self: EngineTx,
         node_id: NodeId,
         arena_bytes: usize,
-        complete_sink: Option<mpsc::UnboundedSender<Completion>>,
-        fail_sink: Option<mpsc::UnboundedSender<(InstrId, String)>>,
-        idle: oneshot::Sender<()>,
+        complete_sink: mpsc::UnboundedSender<Completion>,
+        fail_sink: mpsc::UnboundedSender<(InstrId, String)>,
     ) -> Result<Engine> {
         let streams = (0..STREAMS)
             .map(|_| Stream::new(StreamFlags::NON_BLOCKING, None))
@@ -194,8 +188,6 @@ impl Engine {
             completions: Vec::new(),
             complete_sink,
             fail_sink,
-            idle: Some(idle),
-            had_work: false,
         })
     }
 
@@ -207,10 +199,6 @@ impl Engine {
             while let Ok(msg) = rx.try_recv() {
                 msg_recvd = true;
 
-                if matches!(msg, EngineMsg::Shutdown) {
-                    return;
-                }
-
                 if let Err(e) = self.handle(msg) {
                     eprintln!("node{} engine error: {e:#}", self.node_id);
                 }
@@ -219,7 +207,6 @@ impl Engine {
             self.poll_inflight();
             self.try_issue();
             self.flush_completions();
-            self.check_idle();
 
             if !msg_recvd && self.inflight.is_empty() && self.ready.is_empty() {
                 self.check_alloc_stall();
@@ -273,7 +260,6 @@ impl Engine {
             EngineMsg::GetKernel { hash, reply } => {
                 let _ = reply.send(self.ptx.text_of(&hash));
             }
-            EngineMsg::Shutdown => {}
         }
         Ok(())
     }
@@ -285,8 +271,6 @@ impl Engine {
             seg.id,
             seg.instructions.len()
         );
-
-        self.had_work = true;
 
         // Insert every node, then wire dep counters. Deps are node-local and
         // come earlier in topological order, so a dep in the table is unfinished.
@@ -395,10 +379,7 @@ impl Engine {
 
     fn fail(&mut self, iid: InstrId, msg: String) {
         eprintln!("node{} instr {iid} failed: {msg}", self.node_id);
-
-        if let Some(s) = &self.fail_sink {
-            let _ = s.send((iid, msg));
-        }
+        let _ = self.fail_sink.send((iid, msg));
     }
 
     fn complete(&mut self, iid: InstrId) -> Result<()> {
@@ -420,28 +401,8 @@ impl Engine {
     }
 
     fn flush_completions(&mut self) {
-        if self.completions.is_empty() {
-            return;
-        }
-        if let Some(sink) = &self.complete_sink {
-            for c in self.completions.drain(..) {
-                let _ = sink.send(c);
-            }
-        } else {
-            self.completions.clear();
-        }
-    }
-
-    fn check_idle(&mut self) {
-        if self.had_work
-            && self.table.is_empty()
-            && self.inflight.is_empty()
-            && self.ready.is_empty()
-            && self.deferred_frees.is_empty()
-            && self.deferred_allocs.is_empty()
-            && let Some(tx) = self.idle.take()
-        {
-            let _ = tx.send(());
+        for c in self.completions.drain(..) {
+            let _ = self.complete_sink.send(c);
         }
     }
 }
