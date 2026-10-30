@@ -126,7 +126,7 @@ remembered figure and has to be labelled as such.
 ## Workspace layout
 - **phobos-lang**: codegen via MLIR. See also `SPEC.md`. Everything the portable
   dialects cannot express goes through `codegen/target/`: `Isa` is the
-  instruction vocabulary and `nvidia.rs` the one implementation, so the rest of
+  instruction vocabulary and `nvidia/` the one implementation, so the rest of
   `codegen/` never names an instruction and never reads `gpu_config`
 - **phobos-mlir**: `gen_code` runs the GPU lowering pipeline (gpu -> NVVM -> LLVM
   IR -> PTX via inkwell/NVPTX), taking the pass pipeline and the LLVM machine
