@@ -473,30 +473,11 @@ pub struct DeviceBackend {
     /// Never changed after construction, since a launch keys its function
     /// cache on the module's address.
     formats: HashMap<Quant, formats::FormatKernels>,
-    /// IQ1_S's grid, [`crate::quant::iq1s_flat_grid`] at one `i32` per
-    /// lane. Shared by every IQ1_S and IQ1_M weight.
-    iq1s_grid: DeviceBuffer<i32>,
-    /// IQ2_XXS's magnitude grid and sign table, flattened like IQ1_S's.
-    iq2xxs_grid: DeviceBuffer<i32>,
-    iq2xxs_signs: DeviceBuffer<i32>,
-    /// IQ2_S's magnitude grid and sign table. The signs are keyed by raw
-    /// byte rather than parity index, unlike IQ2_XXS's.
-    iq2s_grid: DeviceBuffer<i32>,
-    iq2s_signs: DeviceBuffer<i32>,
-    /// IQ2_XS's magnitude grid. Its signs use `iq2xxs_signs`.
-    iq2xs_grid: DeviceBuffer<i32>,
-    /// IQ3_XXS's magnitude grid, four `i32` lanes per entry. Its signs use
-    /// `iq2xxs_signs`.
-    iq3xxs_grid: DeviceBuffer<i32>,
-    /// IQ3_S's magnitude grid, four `i32` lanes per entry. Its signs use
-    /// `iq2s_signs`.
-    iq3s_grid: DeviceBuffer<i32>,
     /// IQ4_XS's fixed sixteen-value codebook, indexed directly by each
     /// nibble. See [`crate::quant::iq4xs_flat_codebook`].
     iq4xs_codebook: DeviceBuffer<i32>,
-    /// The same tables at one `i8` per slot, read by the f32 decode matvecs
-    /// and `qdecode`. The i32 copies above serve the `gather`-based
-    /// fallbacks.
+    /// IQ1_S's grid at one `i8` per slot, read by the f32 decode matvecs and
+    /// `qdecode`. Shared by every IQ1_S and IQ1_M weight.
     iq1s_grid_packed: DeviceBuffer<i8>,
     /// The IQ1_S grid with the delta and signs folded in, giving an exact
     /// `i8` weight. See `quant::iq1s_signed_grid`.
@@ -514,6 +495,8 @@ pub struct DeviceBackend {
     /// and the pool's free list after a dense pass. See `residency.rs`.
     dense_scratch_shared: bool,
     trim_after_dense: bool,
+    /// The other IQ formats' grids, packed like IQ1_S's. IQ2_XS and IQ3_XXS
+    /// read IQ2_XXS's signs, IQ3_S reads IQ2_S's.
     iq2xxs_grid_packed: DeviceBuffer<i8>,
     /// The signs as +/-1 for the float decode, followed by the same signs as
     /// a 0/-1 mask for the dp4a decode.
@@ -523,9 +506,6 @@ pub struct DeviceBackend {
     iq2xs_grid_packed: DeviceBuffer<i8>,
     iq3xxs_grid_packed: DeviceBuffer<i8>,
     iq3s_grid_packed: DeviceBuffer<i8>,
-    /// `[0, 1, .., 7]`, the offsets a grid-coded raw kernel's `gather`
-    /// broadcasts against to read an eight-wide lane in one call.
-    iota8: DeviceBuffer<i32>,
     /// One entry per `quantize_act` in a pass, each grown to the largest
     /// projection seen. Several are live at once, and a pass takes them in
     /// the same order every time.

@@ -344,26 +344,11 @@ impl Backend for DeviceBackend {
     }
 
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
-        // Formats with a dequant kernel, used for multi-row batches.
-        const DEQUANT_FORMATS: [Quant; 9] = [
-            Quant::IQ1_S,
-            Quant::IQ2_XXS,
-            Quant::IQ1_M,
-            Quant::IQ2_S,
-            Quant::IQ2_XS,
-            Quant::IQ3_XXS,
-            Quant::IQ3_S,
-            Quant::IQ4_XS,
-            Quant::Q2_K,
-        ];
         // Prefer the fused projection, which decodes inside the contraction
         // and needs no scratch. See `raw_qmma_eligible` for the shapes it
         // takes.
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
             return self.project_raw_qmma(None, a, m, k, w, n, (out, 0));
-        }
-        if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
-            return self.project_raw_dense(a, m, k, w, n, out);
         }
         self.project_raw(None, a, m, k, w, n, out)
     }

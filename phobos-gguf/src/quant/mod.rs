@@ -28,27 +28,23 @@ mod tables;
 #[cfg(any(test, feature = "cuda"))]
 pub(crate) use iq1_s::signed_grid as iq1s_signed_grid;
 #[cfg(feature = "cuda")]
-pub(crate) use iq1_s::{
-    flat_grid as iq1s_flat_grid, grid2 as iq1s_grid2, grid4 as iq1s_grid4,
-    packed_grid as iq1s_packed_grid,
-};
+pub(crate) use iq1_s::{grid2 as iq1s_grid2, grid4 as iq1s_grid4, packed_grid as iq1s_packed_grid};
 #[cfg(feature = "cuda")]
 pub(crate) use iq2_s::{
-    flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs, packed_grid as iq2s_packed_grid,
-    packed_sign_masks as iq2s_sign_masks, packed_signs as iq2s_packed_signs,
+    packed_grid as iq2s_packed_grid, packed_sign_masks as iq2s_sign_masks,
+    packed_signs as iq2s_packed_signs,
 };
 #[cfg(feature = "cuda")]
-pub(crate) use iq2_xs::{flat_grid as iq2xs_flat_grid, packed_grid as iq2xs_packed_grid};
+pub(crate) use iq2_xs::packed_grid as iq2xs_packed_grid;
 #[cfg(feature = "cuda")]
 pub(crate) use iq2_xxs::{
-    flat_grid as iq2xxs_flat_grid, flat_signs as iq2xxs_flat_signs,
     packed_grid as iq2xxs_packed_grid, packed_sign_masks as iq2xxs_sign_masks,
     packed_signs as iq2xxs_packed_signs,
 };
 #[cfg(feature = "cuda")]
-pub(crate) use iq3_s::{flat_grid as iq3s_flat_grid, packed_grid as iq3s_packed_grid};
+pub(crate) use iq3_s::packed_grid as iq3s_packed_grid;
 #[cfg(feature = "cuda")]
-pub(crate) use iq3_xxs::{flat_grid as iq3xxs_flat_grid, packed_grid as iq3xxs_packed_grid};
+pub(crate) use iq3_xxs::packed_grid as iq3xxs_packed_grid;
 #[cfg(feature = "cuda")]
 pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
 pub use q8_0::{BLOCK as Q8_0_BLOCK, UNIT as Q8_0_UNIT, UNIT_BYTES as Q8_0_UNIT_BYTES, pack as pack_q8_0, quantize_row, unit_into as q8_0_unit_into, units as q8_0_units};

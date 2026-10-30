@@ -33,28 +33,8 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ2XXS_GRID`] flattened to one magnitude byte per slot:
-/// `flat_grid()[i * 8 + j]` is byte `j` of `IQ2XXS_GRID[i]`.
-#[cfg(feature = "cuda")]
-pub(crate) fn flat_grid() -> Vec<i32> {
-    IQ2XXS_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(i32::from))
-        .collect()
-}
-
-/// [`KSIGNS_IQ2XS`] expanded to per-element +-1 multipliers via
-/// [`KMASK_IQ2XS`]: `flat_signs()[i * 8 + j]` is element `j`'s sign under
-/// sign index `i`.
-#[cfg(feature = "cuda")]
-pub(crate) fn flat_signs() -> Vec<i32> {
-    KSIGNS_IQ2XS
-        .iter()
-        .flat_map(|&byte| KMASK_IQ2XS.map(move |bit| if byte & bit != 0 { -1 } else { 1 }))
-        .collect()
-}
-
-/// [`flat_grid`]'s values as raw bytes, the layout `iq2xxs_qdot_t` reads.
+/// [`IQ2XXS_GRID`] as raw bytes, the layout `iq2xxs_qdot_t` reads:
+/// `packed_grid()[i * 8 + j]` is byte `j` of `IQ2XXS_GRID[i]`.
 /// A lane's eight magnitudes are contiguous, so one 64-bit load fetches
 /// them. Magnitudes are at most 43, so `i8` holds them exactly.
 #[cfg(feature = "cuda")]
@@ -76,7 +56,9 @@ pub(crate) fn packed_sign_masks() -> Vec<i8> {
         .collect()
 }
 
-/// [`flat_signs`] packed the same way; the multipliers are +-1.
+/// [`KSIGNS_IQ2XS`] expanded to per-element +-1 multipliers via
+/// [`KMASK_IQ2XS`]: `packed_signs()[i * 8 + j]` is element `j`'s sign under
+/// sign index `i`.
 #[cfg(feature = "cuda")]
 pub(crate) fn packed_signs() -> Vec<i8> {
     KSIGNS_IQ2XS

@@ -41,16 +41,6 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     }
 }
 
-/// [`IQ1S_GRID`] flattened to sign-extended lanes: `flat_grid()[i * 8 + j]`
-/// is byte `j` of `IQ1S_GRID[i]` read as `i8`.
-#[cfg(feature = "cuda")]
-pub(crate) fn flat_grid() -> Vec<i32> {
-    IQ1S_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(|b| i32::from(b as i8)))
-        .collect()
-}
-
 /// [`IQ1S_GRID`] as raw signed bytes, the layout `iq1s_qdot_t` reads:
 /// `packed_grid()[i * 8 + j]` is byte `j` of `IQ1S_GRID[i]`. A lane's eight
 /// values are contiguous, so one 64-bit load fetches them.

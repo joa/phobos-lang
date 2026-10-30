@@ -35,19 +35,9 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ3XXS_GRID`] flattened to one magnitude byte per slot, four per entry:
-/// `flat_grid()[i * 4 + j]` is byte `j` of `IQ3XXS_GRID[i]`. A lane's eight
-/// elements come from two entries.
-#[cfg(feature = "cuda")]
-pub(crate) fn flat_grid() -> Vec<i32> {
-    IQ3XXS_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(i32::from))
-        .collect()
-}
-
-/// [`flat_grid`]'s values as raw bytes. Entries are four bytes wide here, not
-/// eight, so a lane's two entries are two 32-bit loads rather than eight.
+/// [`IQ3XXS_GRID`] as raw bytes, four per entry: `packed_grid()[i * 4 + j]`
+/// is byte `j` of `IQ3XXS_GRID[i]`. A lane's eight elements come from two
+/// entries, two 32-bit loads.
 #[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ3XXS_GRID

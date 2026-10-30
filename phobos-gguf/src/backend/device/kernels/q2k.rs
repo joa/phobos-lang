@@ -1,4 +1,5 @@
-// Q2_K matvec, decoding straight from the raw block bytes.
+// Q2_K's weight expansion for a prompt pass, decoding straight from the raw
+// block bytes. One row takes `q2k_qdot_lanes` instead.
 //
 // All sixteen runs sit at static offsets, in output order, so the block
 // unrolls into one straight-line expression per run with no `gather`. A
@@ -43,40 +44,8 @@ fn decoded_run(is: usize) -> (usize, String) {
     )
 }
 
-pub(crate) fn q2k_matvec_src(tn: usize) -> String {
-    let mut body = String::new();
-    for is in 0..RUNS_PER_BLOCK {
-        let (out_off, decode) = decoded_run(is);
-        let _ = writeln!(
-            body,
-            "{decode}    let a{is} = A[pm :+ 1, kb * 256 + {out_off} :+ {RUN}]
-    acc += dot_t(a{is}, decoded{is})"
-        );
-    }
-
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-kernel q2k_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                  D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
-                  C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  let pm = ctx.block.y
-  var acc: tile<f32>[1, TN] = 0.0
-  for kb in range(0, NB, 1) {{
-    var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
-    let d = D[pn * TN :+ TN, kb :+ 1]
-    let dmin = DMIN[pn * TN :+ TN, kb :+ 1]
-{body}  }}
-  C[pm :+ 1, pn * TN :+ TN] = acc
-}}
-"
-    )
-}
-
-
-/// [`q2k_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
-/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
+/// The decode stored into a `[K, N]` scratch, so a matmul over many rows
+/// decodes only once. The `transpose` matches `Backend::matmul`'s layout.
 pub(crate) fn q2k_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..RUNS_PER_BLOCK {
