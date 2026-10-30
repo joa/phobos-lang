@@ -121,18 +121,18 @@ pub fn start() -> Result<Dashboard> {
     Ok(Dashboard { meter, drawing })
 }
 
-/// Variables that enable reports written straight to stderr, bypassing the
-/// logger. They would draw over the dashboard.
-///
-/// Presence turns them on, not the value, so `PHOBOS_VRAM=0` counts too.
-const RAW_REPORTS: &[&str] = &["PHOBOS_VRAM", "PHOBOS_PASS_REPORT"];
-
-/// The first of [`RAW_REPORTS`] that is set, if any.
+/// The first variable whose report goes straight to stderr, bypassing the
+/// logger, and so would draw over the dashboard; each read as the device
+/// backend reads it.
 pub fn raw_report() -> Option<&'static str> {
-    RAW_REPORTS
-        .iter()
-        .copied()
-        .find(|name| std::env::var_os(name).is_some())
+    if phobos_base::env::flag("PHOBOS_VRAM") {
+        return Some("PHOBOS_VRAM");
+    }
+    // A replay number, empty or unparsed meaning the default one; `0` none.
+    match std::env::var("PHOBOS_PASS_REPORT") {
+        Ok(v) if v.parse::<u64>() != Ok(0) => Some("PHOBOS_PASS_REPORT"),
+        _ => None,
+    }
 }
 
 /// Why a dashboard would not be drawn here, if it would not.
