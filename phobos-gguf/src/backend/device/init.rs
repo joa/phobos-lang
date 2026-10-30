@@ -217,7 +217,6 @@ impl DeviceBackend {
             argmax_finish,
             argmax_scratch: RefCell::new(None),
             blocked: RefCell::new(HashMap::new()),
-            attn_gemm: RefCell::new(HashMap::new()),
             attn_tc: RefCell::new(HashMap::new()),
             attn_tc_on: env_flag_on("PHOBOS_ATTN_TC"),
             attn_flash: RefCell::new(HashMap::new()),

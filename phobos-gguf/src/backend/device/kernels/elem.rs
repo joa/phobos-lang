@@ -72,15 +72,13 @@ kernel gate_into(X: tensor<f32>[M, N], G: tensor<f32>[M, N]) {
 ";
 
 /// The element types of a strided copy. The caches are f16 and everything
-/// else is f32, so a copy into or out of a cache converts; see [`HBuf`].
+/// else is f32, so a copy into a cache converts; see [`HBuf`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Strided {
     /// f32 to f32, as in a fused projection's split.
     Dense,
     /// f32 to f16: keys and values written into a cache.
     Store,
-    /// f16 to f32: a cached head gathered for the prompt's matmuls.
-    Load,
 }
 
 impl Strided {
@@ -88,7 +86,6 @@ impl Strided {
         match self {
             Strided::Dense => "copy_2d",
             Strided::Store => "store_2d",
-            Strided::Load => "load_2d",
         }
     }
 
@@ -98,7 +95,6 @@ impl Strided {
         match self {
             Strided::Dense => ("f32", "f32", ""),
             Strided::Store => ("f32", "f16", "f16"),
-            Strided::Load => ("f16", "f32", "f32"),
         }
     }
 }

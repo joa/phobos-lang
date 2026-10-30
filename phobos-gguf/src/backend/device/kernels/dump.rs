@@ -46,7 +46,6 @@ fn dump_raw_kernel_sources() {
         sources.push((name.to_string(), attn_flash_src(256, 4, shape, 1)));
         sources.push((format!("{name}_split"), attn_flash_src(256, 4, shape, 4)));
     }
-    sources.push(("attn_gemm".to_string(), attn_gemm_src(256, ATTN_GEMM_TILE)));
     sources.push(("q8_split".to_string(), Q8_SPLIT_SRC.replace("{ALIGNED}", "@aligned(N = TN, K = 32)")));
     sources.push(("moe_topk".to_string(), moe_topk_src()));
     sources.push(("q8_qdot_lanes".to_string(), q8_qdot_lanes_src(false)));

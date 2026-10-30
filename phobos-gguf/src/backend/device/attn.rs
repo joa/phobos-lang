@@ -1,5 +1,5 @@
-// The five attention paths: tensor-core, gemm, blocked, decode and
-// row-at-a-time.
+// The attention paths: flash and tensor-core for a prompt's whole tiles,
+// blocked, the split and persistent decode, and row-at-a-time.
 
 use super::*;
 
@@ -75,8 +75,8 @@ impl DeviceBackend {
 
     /// Picks the attention path for this shape: the tensor cores for a
     /// prompt's whole tiles, flash where it fits and the written-out scores
-    /// otherwise, then the blocked kernel, the two-matmul path,
-    /// the decode split, and a row at a time.
+    /// otherwise, then the blocked kernel, the decode split, and a row at a
+    /// time.
     pub(super) fn attention_any(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         let block = attention_block_tile(spec.head_dim);
         // The tensor cores take the whole tiles of the prompt, and the
@@ -108,10 +108,6 @@ impl DeviceBackend {
         // aligned to the tile, so a misaligned start falls through.
         if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
             return self.attention_blocked(q, keys, values, spec, block, out, 0);
-        }
-        // Next, the two-matmul path if the shape tiles evenly.
-        if attn_gemm_fits(spec) {
-            return self.attention_gemm(q, keys, values, spec, out);
         }
         match spec.rows {
             1 => self.attention_decode(q, keys, values, spec, out),
@@ -233,124 +229,6 @@ impl DeviceBackend {
         );
         self.release(scores);
         self.release(sums);
-        result
-    }
-
-    /// Causal attention for a prompt, one head at a time, as two matmuls with
-    /// the scores materialized in between. See [`attn_gemm_src`].
-    pub(super) fn attention_gemm(
-        &self,
-        q: Buf,
-        keys: HBuf,
-        values: HBuf,
-        spec: Attn,
-        out: Buf,
-    ) -> Result<()> {
-        let (rows, dim, nk) = (spec.rows, spec.head_dim, spec.total());
-        let (qw, kw) = ((spec.n_head * dim) as i64, spec.kv_width());
-        let tile = ATTN_GEMM_TILE;
-
-        let head = self.alloc(rows * dim)?;
-        let transposed = self.alloc(dim * nk)?;
-        let value = self.alloc(nk * dim)?;
-        let scores = self.alloc(rows * nk)?;
-        let sums = self.alloc(rows)?;
-        let mixed = self.alloc(rows * dim)?;
-
-        let result = self.with_kernel(
-            &self.attn_gemm,
-            dim,
-            "attn_gemm",
-            || attn_gemm_src(dim, tile),
-            |module| {
-                let (r, d, n) = (rows as i64, dim as i64, nk as i64);
-                for h in 0..spec.n_head {
-                    // Consecutive query heads share a key head, so the
-                    // transpose and value gather only rerun when it changes.
-                    if h.is_multiple_of(spec.group()) {
-                        let at = h / spec.group() * dim;
-                        self.launch(
-                            module,
-                            "attn_kt",
-                            &[
-                                (self.hptr(keys, at)?, [n, kw as i64]),
-                                (self.ptr(transposed, 0)?, [d, n]),
-                            ],
-                            (nk.div_ceil(ATTN_KT_ROWS) as u32, 1, 1),
-                        )?;
-                        // Both matmuls contract in f32, so the values widen
-                        // once here, as the keys do in the transpose above.
-                        self.strided(
-                            Strided::Load,
-                            (self.hptr(values, at)?, kw),
-                            (self.ptr(value, 0)?, dim),
-                            nk,
-                            dim,
-                        )?;
-                    }
-                    self.copy_2d(
-                        Plane {
-                            buf: q,
-                            offset: h * dim,
-                            pitch: spec.n_head * dim,
-                        },
-                        Plane {
-                            buf: head,
-                            offset: 0,
-                            pitch: dim,
-                        },
-                        rows,
-                        dim,
-                    )?;
-                    self.launch(
-                        module,
-                        "attn_scores",
-                        &[
-                            (self.ptr(head, 0)?, [r, d]),
-                            (self.ptr(transposed, 0)?, [d, n]),
-                            (self.ptr(scores, 0)?, [r, n]),
-                        ],
-                        ((rows / tile) as u32, nk.div_ceil(tile) as u32, 1),
-                    )?;
-                    self.launch(
-                        module,
-                        "attn_softmax",
-                        &[(self.ptr(scores, 0)?, [r, n]), (self.ptr(sums, 0)?, [r, 1])],
-                        ((rows / ATTN_SOFT_TILE) as u32, 1, 1),
-                    )?;
-                    self.launch(
-                        module,
-                        "attn_mix",
-                        &[
-                            (self.ptr(scores, 0)?, [r, n]),
-                            (self.ptr(value, 0)?, [n, d]),
-                            (self.ptr(sums, 0)?, [r, 1]),
-                            (self.ptr(mixed, 0)?, [r, d]),
-                        ],
-                        ((rows / ATTN_SOFT_TILE) as u32, (dim / tile) as u32, 1),
-                    )?;
-                    self.copy_2d(
-                        Plane {
-                            buf: mixed,
-                            offset: 0,
-                            pitch: dim,
-                        },
-                        Plane {
-                            buf: out,
-                            offset: h * dim,
-                            pitch: qw as usize,
-                        },
-                        rows,
-                        dim,
-                    )?;
-                }
-                Ok(())
-            },
-        );
-
-        for buf in [head, transposed, value, scores, sums, mixed] {
-            self.release(buf);
-        }
         result
     }
 

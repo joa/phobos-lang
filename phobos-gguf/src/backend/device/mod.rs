@@ -56,7 +56,7 @@ use fused::*;
 use kernels::*;
 
 pub use experts::moe_qgemm_src;
-pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, QGEMM_TM, QGEMM_TN, attn_gemm_src, moe_gateup_src, moe_qdot_src, moe_topk_src, q4k_qdot_lanes_src};
+pub use kernels::{QGEMM_TM, QGEMM_TN, moe_gateup_src, moe_qdot_src, moe_topk_src, q4k_qdot_lanes_src};
 
 /// The formats `PHOBOS_RAW_QMMA` enables for the fused prompt projection.
 /// It takes a comma-separated list of format names, or a plain on/off flag.
@@ -382,7 +382,6 @@ pub struct DeviceBackend {
     argmax_scratch: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// The blocked attention kernels, keyed like `attentions`.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
-    attn_gemm: RefCell<HashMap<usize, Module>>,
     /// The tensor-core prompt attention, by head dimension and group size.
     attn_tc: RefCell<HashMap<(usize, usize), Module>>,
     /// Whether a prompt's attention takes [`kernels::attn_tc_src`] where it

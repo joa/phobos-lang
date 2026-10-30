@@ -53,39 +53,18 @@ pub(crate) fn attention_block_tile(head_dim: usize) -> usize {
     (ATTN_BLOCK_ELEMS / head_dim).clamp(1, 16)
 }
 
-/// Query rows and keys of one [`attn_gemm_src`] score tile.
-///
-/// The tile is square, so on the tile straddling the diagonal key `j` and
-/// query `i` share tile coordinates, and `tril` is the causal mask.
-pub const ATTN_GEMM_TILE: usize = 64;
-
-pub(crate) const ATTN_GEMM_STEP: usize = 32;
-
-/// Row tile of the softmax and the mix, bounded by shared memory. The
-/// softmax holds four square tiles at once, so 64 would not fit.
-///
-/// The mix must use the same row tile, since the softmax only zeroes a row
-/// up to its own last query. Its step is shallower to fit the `[32, 64]`
-/// accumulator.
-pub const ATTN_SOFT_TILE: usize = 32;
-
-pub(crate) const ATTN_MIX_STEP: usize = 16;
-
-/// Rows one program of the key transpose carries.
-pub(crate) const ATTN_KT_ROWS: usize = 8;
-
-/// Whether a call tiles evenly for [`DeviceBackend::attention_gemm`]. The
-/// fallback kernels need no alignment.
-pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
-    spec.rows >= ATTN_GEMM_TILE
-        && spec.rows.is_multiple_of(ATTN_GEMM_TILE)
-        && spec.start_pos.is_multiple_of(ATTN_GEMM_TILE)
-        && spec.head_dim.is_multiple_of(ATTN_GEMM_TILE)
-        && spec.total().is_multiple_of(ATTN_KT_ROWS)
-}
-
 /// Query rows and keys of one [`attn_tc_src`] score tile.
 pub(crate) const ATTN_TC_TILE: usize = 64;
+
+/// The contraction step of [`attn_tc_src`]'s score and mix kernels.
+pub(crate) const ATTN_TC_STEP: usize = 32;
+
+/// Row tile of [`attn_tc_src`]'s softmax and mix, bounded by shared memory.
+/// The softmax holds four square tiles at once, so 64 would not fit.
+///
+/// The mix must use the same row tile, since the softmax only zeroes a row
+/// up to its own last query.
+pub(crate) const ATTN_SOFT_TILE: usize = 32;
 
 /// Bytes of scores [`attn_tc_src`] holds at once. A prompt whose scores
 /// would not fit runs in slabs, see [`attn_tc_slab`].
@@ -136,7 +115,7 @@ pub(crate) fn attn_tc_slab(spec: Attn) -> (usize, usize) {
 /// the tensor cores; the softmax and both accumulations stay f32.
 pub(crate) fn attn_tc_src(head_dim: usize, group: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();
-    let (tile, step, soft) = (ATTN_TC_TILE, ATTN_GEMM_STEP, ATTN_SOFT_TILE);
+    let (tile, step, soft) = (ATTN_TC_TILE, ATTN_TC_STEP, ATTN_SOFT_TILE);
     format!(
         "@tensorcore
 @launch(256)
@@ -199,94 +178,6 @@ kernel attn_tc_mix(S: tensor<f32>[R, SW], V: tensor<f16>[NK, KW], L: tensor<f32>
     acc += dot(a, b)
   }}
   O[pm * TM :+ TM, h * D + pn * TN :+ TN] = acc / L[pm * TM :+ TM, h :+ 1]
-}}
-"
-    )
-}
-
-/// Causal attention for a prompt as a score matmul, a softmax and a mix
-/// matmul, with the full `[rows, keys]` score matrix in between.
-///
-/// [`crate::backend::Backend::attention`] uses it for shapes
-/// [`attention_block_src`] declines: a head dimension whose block tile does
-/// not divide 64, or a misaligned continuation.
-///
-/// Keys are transposed once per head so the score matmul is a plain `dot`.
-/// Each head is gathered into its own buffer first, because a column window
-/// at an unbounded offset would mask every operand and lose pipelining.
-///
-/// The kernels split where a score row must be complete: the softmax needs
-/// the row max and the mix needs the row sum. All three skip blocks past
-/// the diagonal.
-pub fn attn_gemm_src(head_dim: usize, tile: usize) -> String {
-    let scale = (head_dim as f32).sqrt().recip();
-    let (step, soft, mix_step) = (ATTN_GEMM_STEP, ATTN_SOFT_TILE, ATTN_MIX_STEP);
-    format!(
-        "@launch(256)
-@autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], TB in [{ATTN_KT_ROWS}], HD in [{head_dim}])
-@aligned(NK = TN, KW = HD, DK = TB)
-kernel attn_kt(K: tensor<f16>[NK, KW], T: tensor<f32>[DK, NK]) {{
-  let p = ctx.block.x
-  var t = K[p * TB :+ TB, 0 :+ HD]
-  T[0 :+ HD, p * TB :+ TB] = f32(transpose(t))
-}}
-
-@launch(256)
-@autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], HD in [{head_dim}])
-@aligned(R = TM, NK = TN, DQ = TK, DK = TK)
-kernel attn_scores(Q: tensor<f32>[R, DQ], KT: tensor<f32>[DK, NK], S: tensor<f32>[R, NK]) {{
-  let pm = ctx.block.x
-  let pn = ctx.block.y
-  if pn * TN < NK - R + pm * TM + TM {{
-    var acc: tile<f32>[TM, TN] = 0.0
-    for kt in range(0, DQ, TK) {{
-      var a = Q[pm * TM :+ TM, kt :+ TK]
-      var b = KT[kt :+ TK, pn * TN :+ TN]
-      acc += dot(a, b)
-    }}
-    S[pm * TM :+ TM, pn * TN :+ TN] = acc * {scale:.9}
-  }}
-}}
-
-@launch(256)
-@autotune(TM in [{soft}], TN in [{soft}])
-@aligned(R = TM, NK = TN)
-kernel attn_softmax(S: tensor<f32>[R, NK], L: tensor<f32>[R, 1]) {{
-  let p = ctx.block.x
-  let diag = NK - R + p * TM
-  var m: tile<f32>[TM, 1] = -1.0e30
-  for j in range(0, diag, TN) {{
-    m = tmax(m, rowmax(S[p * TM :+ TM, j :+ TN]))
-  }}
-  var d = S[p * TM :+ TM, diag :+ TN]
-  m = tmax(m, rowmax(d))
-
-  var l: tile<f32>[TM, 1] = 0.0
-  for j in range(0, diag, TN) {{
-    var e = exp(S[p * TM :+ TM, j :+ TN] - m)
-    l += rowsum(e)
-    S[p * TM :+ TM, j :+ TN] = e
-  }}
-  var de = tril(exp(d - m))
-  l += rowsum(de)
-  S[p * TM :+ TM, diag :+ TN] = de
-  L[p * TM :+ TM, 0 :+ 1] = l
-}}
-
-@launch(256)
-@autotune(TM in [{soft}], TN in [{tile}], TK in [{mix_step}])
-@aligned(R = TM, DV = TN, NK = TK)
-kernel attn_mix(P: tensor<f32>[R, NK], V: tensor<f32>[NK, DV], L: tensor<f32>[R, 1],
-                O: tensor<f32>[R, DV]) {{
-  let pm = ctx.block.x
-  let pn = ctx.block.y
-  var acc: tile<f32>[TM, TN] = 0.0
-  for kt in range(0, NK - R + pm * TM + TM, TK) {{
-    var a = P[pm * TM :+ TM, kt :+ TK]
-    var b = V[kt :+ TK, pn * TN :+ TN]
-    acc += dot(a, b)
-  }}
-  O[pm * TM :+ TM, pn * TN :+ TN] = acc / L[pm * TM :+ TM, 0 :+ 1]
 }}
 "
     )
