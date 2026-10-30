@@ -41,17 +41,7 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
 /// Splits the blocks into quants and scales without decoding, so a device
 /// uploads a quarter of the bytes and multiplies in the kernel.
 fn planes(bytes: &[u8], k: usize, n: usize) -> Planes {
-    let blocks = k / BLOCK;
-    let mut qs = vec![0i8; k * n];
-    let mut scales = vec![0.0f32; blocks * n];
-    for (index, block) in bytes.chunks_exact(BLOCK_BYTES).enumerate() {
-        let (j, b) = (index / blocks, index % blocks);
-        scales[b * n + j] = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        for (dst, &q) in qs[j * k + b * BLOCK..][..BLOCK].iter_mut().zip(&block[2..]) {
-            *dst = q as i8;
-        }
-    }
-    Planes { qs, scales }
+    super::scaled_planes::<BLOCK>(bytes, k, n, BLOCK_BYTES, |block| std::array::from_fn(|i| block[2 + i] as i8))
 }
 
 /// The inverse of [`planes`]: builds blocks from given quants and scales.

@@ -4,8 +4,8 @@
 /// Output columns per CTA.
 pub(crate) const IQ1S_TN: usize = 8;
 
-/// [`crate::quant::iq1s_packed_grid`]'s length: 2048 grid entries of eight
-/// lanes each.
+/// IQ1_S's packed grid's length ([`crate::quant::tables::packed`]): 2048
+/// entries of eight lanes each.
 pub(crate) const IQ1S_GRID_LEN: usize = 2048 * 8;
 
 /// The f32 decode matvec for `m == 1`; see `iq_f32.rs`. It needs `N` to be a
@@ -55,7 +55,7 @@ pub(crate) const IQ1S_QMMA_CTA: usize = 64;
 
 /// Twice [`IQ1S_GRID_LEN`]. The signed table holds both sign foldings of
 /// every entry, so the group's sign bit is an index bit rather than
-/// arithmetic. See `crate::quant::iq1s_signed_grid`.
+/// arithmetic. See `crate::quant::iq1_s::signed_grid`.
 pub(crate) const IQ1S_SIGNED_GRID_LEN: usize = 2 * IQ1S_GRID_LEN;
 
 /// IQ1_S's prompt projection, decode and contraction in one kernel. It

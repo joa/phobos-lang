@@ -23,7 +23,7 @@
 
 use phobos_base::half::f16_to_f32;
 
-use super::{RawScales, Spec};
+use super::{RawHeader, Spec};
 
 pub(crate) const FILE_BLOCK: usize = 128;
 pub(crate) const FILE_BLOCK_BYTES: usize = 28;
@@ -44,7 +44,8 @@ pub static SPEC: Spec = Spec {
     has_min: false,
     dequantize,
     planes: None,
-    raw_scales: Some(raw_scales),
+    // The pair's first `d`. The kernels read both from the block itself.
+    raw_scales: Some(RawHeader::At { d: D, dmin: None }),
 };
 
 /// Trit `n` (0 the most significant) of a TQ1_0-encoded byte.
@@ -92,16 +93,6 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
             *y = d * (f32::from(t) - 1.0);
         }
     }
-}
-
-/// The first file block's `d` of each pair, the plane every raw format
-/// uploads. The kernels read both scales from the block itself.
-fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
-    let d = bytes
-        .chunks_exact(BLOCK_BYTES)
-        .map(|b| u16::from_le_bytes([b[D], b[D + 1]]))
-        .collect();
-    RawScales { d, dmin: Vec::new() }
 }
 
 /// A pair of file blocks re-laid for the device; see the module comment.

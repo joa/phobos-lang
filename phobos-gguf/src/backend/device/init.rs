@@ -2,6 +2,10 @@
 // the grid tables the IQ formats decode with, and the environment knobs.
 
 use super::*;
+use crate::quant::tables::iq1::IQ1S_GRID;
+use crate::quant::tables::iq2::{IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, KSIGNS_IQ2XS};
+use crate::quant::tables::iq3::{IQ3S_GRID, IQ3XXS_GRID};
+use crate::quant::tables::{packed, packed_signs};
 
 impl DeviceBackend {
     /// A backend whose raw-format kernels cover `quants`, the formats of the
@@ -92,28 +96,16 @@ impl DeviceBackend {
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
         let argmax_finish = compile(&argmax_finish_src(), &[], "argmax_finish")?;
         let formats = formats::build(&formats::to_build(quants))?;
-        let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4xs_flat_codebook())?;
-        let iq1s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq1s_packed_grid())?;
-        let iq1s_signed_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_signed_grid())?;
-        let iq2xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xxs_packed_grid())?;
-        let iq2xxs_signs_packed = DeviceBuffer::from_slice(
-            &[
-                crate::quant::iq2xxs_packed_signs(),
-                crate::quant::iq2xxs_sign_masks(),
-            ]
-            .concat(),
-        )?;
-        let iq2s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2s_packed_grid())?;
-        let iq2s_signs_packed = DeviceBuffer::from_slice(
-            &[
-                crate::quant::iq2s_packed_signs(),
-                crate::quant::iq2s_sign_masks(),
-            ]
-            .concat(),
-        )?;
-        let iq2xs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xs_packed_grid())?;
-        let iq3xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3xxs_packed_grid())?;
-        let iq3s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3s_packed_grid())?;
+        let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4_xs::flat_codebook())?;
+        let iq1s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ1S_GRID, u64::to_le_bytes))?;
+        let iq1s_signed_grid = DeviceBuffer::from_slice(&crate::quant::iq1_s::signed_grid())?;
+        let iq2xxs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2XXS_GRID, u64::to_le_bytes))?;
+        let iq2xxs_signs_packed = DeviceBuffer::from_slice(&packed_signs(KSIGNS_IQ2XS.iter().copied()))?;
+        let iq2s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2S_GRID, u64::to_le_bytes))?;
+        let iq2s_signs_packed = DeviceBuffer::from_slice(&packed_signs(0..=255))?;
+        let iq2xs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2XS_GRID, u64::to_le_bytes))?;
+        let iq3xxs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ3XXS_GRID, u32::to_le_bytes))?;
+        let iq3s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ3S_GRID, u32::to_le_bytes))?;
 
         residency::vram_mark("kernels compiled and loaded");
         Ok(DeviceBackend {

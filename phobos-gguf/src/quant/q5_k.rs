@@ -7,8 +7,8 @@
 
 use phobos_base::half::f16_to_f32;
 
-use super::q4_k::{header_scales, scale_min};
-use super::{RawScales, Spec};
+use super::q4_k::scale_min;
+use super::{RawHeader, Spec};
 
 const BLOCK: usize = 256;
 const BLOCK_BYTES: usize = 176;
@@ -28,12 +28,8 @@ pub static SPEC: Spec = Spec {
     has_min: true,
     dequantize,
     planes: None,
-    raw_scales: Some(raw_scales),
+    raw_scales: Some(RawHeader::At { d: 0, dmin: Some(2) }),
 };
-
-fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
-    header_scales(bytes, BLOCK_BYTES)
-}
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {

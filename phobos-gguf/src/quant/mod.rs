@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, ensure};
+use phobos_base::half::f16_to_f32;
 
 use crate::GgmlType;
 
 mod iq1_m;
-mod iq1_s;
+pub(crate) mod iq1_s;
 mod iq2_s;
 mod iq2_xs;
 mod iq2_xxs;
 mod iq3_s;
 mod iq3_xxs;
-mod iq4_xs;
+pub(crate) mod iq4_xs;
 pub(crate) mod ptq1_0;
 mod q2_k;
 mod q3_k;
@@ -22,31 +23,8 @@ mod q5_1;
 mod q6_k;
 mod q8_0;
 mod q8_1;
-mod tables;
+pub(crate) mod tables;
 
-// Used only by the cuda backend; `iq1s_signed_grid` also has a host test.
-#[cfg(any(test, feature = "cuda"))]
-pub(crate) use iq1_s::signed_grid as iq1s_signed_grid;
-#[cfg(feature = "cuda")]
-pub(crate) use iq1_s::{grid2 as iq1s_grid2, grid4 as iq1s_grid4, packed_grid as iq1s_packed_grid};
-#[cfg(feature = "cuda")]
-pub(crate) use iq2_s::{
-    packed_grid as iq2s_packed_grid, packed_sign_masks as iq2s_sign_masks,
-    packed_signs as iq2s_packed_signs,
-};
-#[cfg(feature = "cuda")]
-pub(crate) use iq2_xs::packed_grid as iq2xs_packed_grid;
-#[cfg(feature = "cuda")]
-pub(crate) use iq2_xxs::{
-    packed_grid as iq2xxs_packed_grid, packed_sign_masks as iq2xxs_sign_masks,
-    packed_signs as iq2xxs_packed_signs,
-};
-#[cfg(feature = "cuda")]
-pub(crate) use iq3_s::packed_grid as iq3s_packed_grid;
-#[cfg(feature = "cuda")]
-pub(crate) use iq3_xxs::packed_grid as iq3xxs_packed_grid;
-#[cfg(feature = "cuda")]
-pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
 pub(crate) use q8_0::BLOCK as Q8_0_BLOCK;
 pub use q8_0::{UNIT as Q8_0_UNIT, UNIT_BYTES as Q8_0_UNIT_BYTES, pack as pack_q8_0, quantize_row, unit_into as q8_0_unit_into, units as q8_0_units};
 
@@ -214,23 +192,48 @@ pub struct Spec {
     /// `scales` is `[k / scale_run, n]`: `scales[(p / scale_run) * n + j]`
     /// scales that quant.
     pub planes: Option<Split>,
-    /// Pulls the per-block `d` and `dmin` header fields out of a `[n, k]`
-    /// weight, as raw f16 bits ([`RawScales`]). Used by kernels that decode
-    /// everything else straight from the uploaded block bytes. `None` for a
-    /// format with no such kernel.
+    /// Where each block keeps its `d` and `dmin` header fields, for kernels
+    /// that decode everything else straight from the uploaded block bytes.
+    /// `None` for a format with no such kernel.
     ///
     /// Unlike `planes`, the blocks stay as the file orders them,
     /// `[n, k / block * block_bytes]`. Only `d` and `dmin` are copied out,
-    /// into their own `[n, k / block]` planes.
-    pub raw_scales: Option<RawSplit>,
+    /// into their own `[n, k / block]` planes; see [`Spec::raw_scales_of`].
+    pub raw_scales: Option<RawHeader>,
 }
 
 /// What [`Spec::planes`] holds: a `[n, k]` weight's blocks into its planes.
 pub type Split = fn(bytes: &[u8], k: usize, n: usize) -> Planes;
 
-/// What [`Spec::raw_scales`] holds: a `[n, k]` weight's blocks into its
-/// header-field planes.
-pub type RawSplit = fn(bytes: &[u8], k: usize, n: usize) -> RawScales;
+/// Where a block keeps the header fields [`Spec::raw_scales`] pulls out.
+#[derive(Clone, Copy)]
+pub enum RawHeader {
+    /// The byte offsets of the `f16` scale and, for a format with a minimum,
+    /// of the minimum.
+    At { d: usize, dmin: Option<usize> },
+    /// No whole scale is stored, so `d`'s bits are rebuilt from the block.
+    Rebuilt(fn(block: &[u8]) -> u16),
+}
+
+impl Spec {
+    /// The header-field planes of `bytes`, whole blocks in this format, as
+    /// [`Spec::raw_scales`] places them. `None` for a format with no raw
+    /// kernel.
+    pub fn raw_scales_of(&self, bytes: &[u8]) -> Option<RawScales> {
+        let blocks = bytes.chunks_exact(self.block_bytes);
+        let half = |at: usize| move |block: &[u8]| u16::from_le_bytes([block[at], block[at + 1]]);
+        Some(match self.raw_scales? {
+            RawHeader::At { d, dmin } => RawScales {
+                d: blocks.clone().map(half(d)).collect(),
+                dmin: dmin.map_or_else(Vec::new, |at| blocks.map(half(at)).collect()),
+            },
+            RawHeader::Rebuilt(d) => RawScales {
+                d: blocks.map(d).collect(),
+                dmin: Vec::new(),
+            },
+        })
+    }
+}
 
 /// A quantized weight's per-super-block scale and minimum, pulled out of its
 /// blocks as raw `f16` bit patterns: [`Spec::raw_scales`].
@@ -409,11 +412,9 @@ impl Packed {
     /// The header-field planes [`Spec::raw_scales`] describes, for a backend
     /// uploading this alongside [`Packed::blocks`].
     pub fn raw_scales(&self) -> Result<RawScales> {
-        let split = self
-            .spec()
-            .raw_scales
-            .with_context(|| format!("no raw kernel decodes {}", self.quant.name()))?;
-        Ok(split(&self.blocks, self.k, self.n))
+        self.spec()
+            .raw_scales_of(&self.blocks)
+            .with_context(|| format!("no raw kernel decodes {}", self.quant.name()))
     }
 
     /// Output row `j` decoded into `out`, which is `k` elements.
@@ -484,6 +485,26 @@ impl Packed {
         blocks.resize(n * first.row_bytes(), 0);
         Packed::new(quant, blocks, k, n)
     }
+}
+
+/// [`Spec::planes`] for a format whose block is a leading `f16` scale and `B`
+/// quants, which `quants` unpacks from the block.
+fn scaled_planes<const B: usize>(
+    bytes: &[u8],
+    k: usize,
+    n: usize,
+    block_bytes: usize,
+    quants: impl Fn(&[u8]) -> [i8; B],
+) -> Planes {
+    let blocks = k / B;
+    let mut qs = vec![0i8; k * n];
+    let mut scales = vec![0.0f32; blocks * n];
+    for (index, block) in bytes.chunks_exact(block_bytes).enumerate() {
+        let (j, b) = (index / blocks, index % blocks);
+        scales[b * n + j] = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        qs[j * k + b * B..][..B].copy_from_slice(&quants(block));
+    }
+    Planes { qs, scales }
 }
 
 /// Bytes a `[n, k]` weight occupies in its format, which needs `k` to be a

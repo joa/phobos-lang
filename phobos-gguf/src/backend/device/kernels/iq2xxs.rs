@@ -8,11 +8,11 @@
 /// Output columns per CTA.
 pub(crate) const IQ2XXS_TN: usize = 8;
 
-/// [`crate::quant::iq2xxs_packed_grid`]'s length: 256 grid entries of eight
-/// lanes each.
+/// IQ2_XXS's packed grid's length: 256 entries of eight lanes each.
 pub(crate) const IQ2XXS_GRID_LEN: usize = 256 * 8;
-/// [`crate::quant::iq2xxs_packed_signs`]'s length: eight sign multipliers for
-/// each of 128 sign indices.
+/// The +-1 half of its packed sign table's length
+/// ([`crate::quant::tables::packed_signs`]): eight multipliers for each of
+/// 128 sign indices.
 pub(crate) const IQ2XXS_SIGNS_LEN: usize = 128 * 8;
 
 /// [`super::iq1s_qdot_matvec_src`] for IQ2_XXS.

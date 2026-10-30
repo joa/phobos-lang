@@ -87,8 +87,8 @@ fn check(quant: Quant, isa: Isa) {
         let trimmed: Vec<u8> = weight.chunks_exact(quant.spec().block_bytes).flat_map(|b| b[skip..skip + unit].to_vec()).collect();
         (group_rows(&trimmed, n, nb, unit), unit)
     };
-    let planes: Vec<u16> = match quant.spec().raw_scales {
-        Some(split) => group_rows(&split(&weight, k, n).d, n, nb, 1),
+    let planes: Vec<u16> = match quant.spec().raw_scales_of(&weight) {
+        Some(scales) => group_rows(&scales.d, n, nb, 1),
         None => vec![0; grouped_len(n, nb, 1)],
     };
     let grouped = Weight::Grouped { bytes: &bytes, block_bytes: unit, nb, scales: &planes };

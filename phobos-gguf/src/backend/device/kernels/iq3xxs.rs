@@ -10,8 +10,7 @@ use super::IQ2XXS_SIGNS_LEN;
 /// Output columns per CTA.
 pub(crate) const IQ3XXS_TN: usize = 8;
 
-/// [`crate::quant::iq3xxs_packed_grid`]'s length: 256 grid entries of four
-/// lanes each.
+/// IQ3_XXS's packed grid's length: 256 entries of four lanes each.
 pub(crate) const IQ3XXS_GRID_LEN: usize = 256 * 4;
 
 /// [`super::iq1s_qdot_matvec_src`] for IQ3_XXS.

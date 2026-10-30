@@ -9,7 +9,7 @@
 use phobos_base::half::f16_to_f32;
 
 use super::tables::iq1::IQ1S_GRID;
-use super::{RawScales, Spec};
+use super::{RawHeader, Spec};
 
 const BLOCK: usize = 256;
 const BLOCK_BYTES: usize = 50;
@@ -26,31 +26,8 @@ pub static SPEC: Spec = Spec {
     has_min: false,
     dequantize,
     planes: None,
-    raw_scales: Some(raw_scales),
+    raw_scales: Some(RawHeader::At { d: 0, dmin: None }),
 };
-
-/// `d` leads this block rather than trailing it, unlike Q2_K and Q3_K.
-fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
-    let mut d = Vec::with_capacity(bytes.len() / BLOCK_BYTES);
-    for block in bytes.chunks_exact(BLOCK_BYTES) {
-        d.push(u16::from_le_bytes([block[0], block[1]]));
-    }
-    RawScales {
-        d,
-        dmin: Vec::new(),
-    }
-}
-
-/// [`IQ1S_GRID`] as raw signed bytes, the layout `iq1s_qdot_t` reads:
-/// `packed_grid()[i * 8 + j]` is byte `j` of `IQ1S_GRID[i]`. A lane's eight
-/// values are contiguous, so one 64-bit load fetches them.
-#[cfg(feature = "cuda")]
-pub(crate) fn packed_grid() -> Vec<i8> {
-    IQ1S_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(|b| b as i8))
-        .collect()
-}
 
 /// [`IQ1S_GRID`] at two bits per value, for `iq1s_qgemm_t`: entry `i` is the
 /// little-endian `u16` whose bits `2j, 2j + 1` are byte `j` of

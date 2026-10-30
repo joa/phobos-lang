@@ -298,7 +298,7 @@ fn f16(v: f32) -> f32 {
 /// activation row sums and no second dot product for the delta.
 #[test]
 fn iq1s_folds_its_delta_into_an_exact_int8() {
-    let grid = iq1s_signed_grid();
+    let grid = iq1_s::signed_grid();
     assert_eq!(grid.len(), 2048 * 2 * 8);
     assert!(
         grid.iter().all(|&g| (-9..=9).contains(&g)),

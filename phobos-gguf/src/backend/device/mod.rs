@@ -472,13 +472,13 @@ pub struct DeviceBackend {
     /// cache on the module's address.
     formats: HashMap<Quant, formats::FormatKernels>,
     /// IQ4_XS's fixed sixteen-value codebook, indexed directly by each
-    /// nibble. See [`crate::quant::iq4xs_flat_codebook`].
+    /// nibble. See [`crate::quant::iq4_xs::flat_codebook`].
     iq4xs_codebook: DeviceBuffer<i32>,
     /// IQ1_S's grid at one `i8` per slot, read by the f32 decode matvecs and
     /// `qdecode`. Shared by every IQ1_S and IQ1_M weight.
     iq1s_grid_packed: DeviceBuffer<i8>,
     /// The IQ1_S grid with the delta and signs folded in, giving an exact
-    /// `i8` weight. See `quant::iq1s_signed_grid`.
+    /// `i8` weight. See `quant::iq1_s::signed_grid`.
     iq1s_signed_grid: DeviceBuffer<i8>,
     /// Whether the fused prompt projection is used. On by default,
     /// `PHOBOS_RAW_QMMA=0` turns it off.

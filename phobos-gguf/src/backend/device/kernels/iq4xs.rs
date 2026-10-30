@@ -2,7 +2,7 @@
 // raw block bytes (see q2k.rs). One row takes `iq4xs_qdot_lanes` instead.
 //
 // Unlike the other IQ formats, quants are not grid-coded. Each nibble
-// indexes a fixed 16-entry codebook ([`crate::quant::iq4xs_flat_codebook`]),
+// indexes a fixed 16-entry codebook ([`crate::quant::iq4_xs::flat_codebook`]),
 // so one `gather` covers a whole 32-element run. The scale is split as in
 // Q4_K: four bits from `scales_l` and two from `scales_h`.
 //
@@ -21,7 +21,7 @@ const SCALES_H_OFF: usize = 2;
 const SCALES_L_OFF: usize = SCALES_H_OFF + 2;
 const QS_OFF: usize = SCALES_L_OFF + 4;
 
-/// [`crate::quant::iq4xs_flat_codebook`]'s length: sixteen nibble values.
+/// [`crate::quant::iq4_xs::flat_codebook`]'s length: sixteen nibble values.
 pub(crate) const IQ4XS_CODEBOOK_LEN: usize = 16;
 
 /// Byte offsets and shifts of run `ib`'s scale bits, low then high, and its
