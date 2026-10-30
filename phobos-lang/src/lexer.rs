@@ -9,6 +9,21 @@ pub struct Lexer<'a> {
     pos: u32,
 }
 
+/// The tokens one character makes, whatever follows it.
+static SINGLE: [(char, Tok); 11] = [
+    ('(', Tok::LParen),
+    (')', Tok::RParen),
+    ('{', Tok::LBrace),
+    ('}', Tok::RBrace),
+    ('[', Tok::LBracket),
+    (']', Tok::RBracket),
+    (',', Tok::Comma),
+    (';', Tok::Semicolon),
+    ('@', Tok::At),
+    ('.', Tok::Dot),
+    ('~', Tok::Tilde),
+];
+
 /// What one step of the lexer read.
 enum Piece {
     Tok(Tok),
@@ -96,6 +111,10 @@ impl<'a> Lexer<'a> {
     fn piece(&mut self) -> Option<Piece> {
         let lo = self.pos;
         let c = self.peek?;
+        if let Some((_, tok)) = SINGLE.iter().find(|(s, _)| *s == c) {
+            self.advance();
+            return Some(Piece::Tok(tok.clone()));
+        }
         let tok = match c {
             '\n' => {
                 self.advance();
@@ -114,46 +133,6 @@ impl<'a> Lexer<'a> {
                     return Some(Piece::Comment);
                 }
                 self.op_eq(BinOp::Div, Tok::Slash)
-            }
-            '(' => {
-                self.advance();
-                Tok::LParen
-            }
-            ')' => {
-                self.advance();
-                Tok::RParen
-            }
-            '{' => {
-                self.advance();
-                Tok::LBrace
-            }
-            '}' => {
-                self.advance();
-                Tok::RBrace
-            }
-            '[' => {
-                self.advance();
-                Tok::LBracket
-            }
-            ']' => {
-                self.advance();
-                Tok::RBracket
-            }
-            ',' => {
-                self.advance();
-                Tok::Comma
-            }
-            ';' => {
-                self.advance();
-                Tok::Semicolon
-            }
-            '@' => {
-                self.advance();
-                Tok::At
-            }
-            '.' => {
-                self.advance();
-                Tok::Dot
             }
             '*' => {
                 self.advance();
@@ -182,10 +161,6 @@ impl<'a> Lexer<'a> {
             '^' => {
                 self.advance();
                 self.op_eq(BinOp::BitXor, Tok::Caret)
-            }
-            '~' => {
-                self.advance();
-                Tok::Tilde
             }
             '+' => {
                 self.advance();
@@ -321,23 +296,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        match s.as_str() {
-            "kernel" => Tok::Kernel,
-            "fn" => Tok::Fn,
-            "let" => Tok::Let,
-            "var" => Tok::Var,
-            "if" => Tok::If,
-            "else" => Tok::Else,
-            "for" => Tok::For,
-            "in" => Tok::In,
-            "while" => Tok::While,
-            "break" => Tok::Break,
-            "continue" => Tok::Continue,
-            "return" => Tok::Return,
-            "true" => Tok::True,
-            "false" => Tok::False,
-            _ => Tok::Ident(s),
-        }
+        Tok::keyword(&s).unwrap_or(Tok::Ident(s))
     }
 }
 
@@ -363,20 +322,7 @@ pub fn classify(text: &str) -> Vec<(Span, Class)> {
     for (i, (tok, span)) in toks.iter().enumerate() {
         let next = toks.get(i + 1).map(|(t, _)| t);
         let class = match tok {
-            Tok::Kernel
-            | Tok::Fn
-            | Tok::Let
-            | Tok::Var
-            | Tok::If
-            | Tok::Else
-            | Tok::For
-            | Tok::In
-            | Tok::While
-            | Tok::Break
-            | Tok::Continue
-            | Tok::Return
-            | Tok::True
-            | Tok::False => Some(Class::Keyword),
+            _ if tok.keyword_text().is_some() => Some(Class::Keyword),
             Tok::Int(_) | Tok::Float(_) => Some(Class::Number),
             Tok::At if matches!(next, Some(Tok::Ident(_))) => Some(Class::Attribute),
             Tok::Ident(_) if i > 0 && toks[i - 1].0 == Tok::At => Some(Class::Attribute),

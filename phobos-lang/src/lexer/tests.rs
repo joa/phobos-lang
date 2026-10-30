@@ -249,3 +249,11 @@ fn lexes_float_exponents() {
     assert_eq!(kinds("2.5E+3")[0], Tok::Float(2500.0));
     assert!(Lexer::new("1e").tokenize().unwrap_err()[0].message.contains("exponent"));
 }
+
+#[test]
+fn every_keyword_lexes_to_its_token_and_prints_as_written() {
+    for (text, tok) in &crate::token::KEYWORDS {
+        assert_eq!(kinds(text)[0], *tok);
+        assert_eq!(tok.to_string(), format!("`{text}`"));
+    }
+}
