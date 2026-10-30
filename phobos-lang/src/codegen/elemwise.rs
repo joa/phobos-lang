@@ -9,8 +9,9 @@ use super::*;
 impl<'c> Codegen<'c> {
 
     /// Sweeps a chain over `src` into `target`, with the outermost step last
-    /// in `steps`. `src` may be `target`, since each thread reads and writes
-    /// the same element.
+    /// in `steps`, converting the result to the target's element type, so an
+    /// empty chain is a converting copy. `src` may be `target`, since each
+    /// thread reads and writes the same element.
     pub(super) fn elem_chain_sweep(
         &mut self,
         block: &Block<'c>,

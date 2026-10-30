@@ -301,7 +301,7 @@ impl<'c> Codegen<'c> {
                 let t = self.tile_ir(ir, ir.operand(op, 0))?;
                 match (step, into) {
                     (ir::ElemStep::Exp, Some(dst)) => {
-                        self.tile_exp_into(block, &t, &dst)?;
+                        self.tile_unary_into(block, &t, &dst, step)?;
                         Ok(dst)
                     }
                     (_, Some(_)) => bail!("no in-place form of {step}"),
@@ -318,11 +318,14 @@ impl<'c> Codegen<'c> {
                         self.release(&t);
                         Ok(out)
                     }
-                    (ir::ElemStep::Exp, None) => self.tile_exp(block, &t),
-                    (ir::ElemStep::Log, None) => self.tile_log(block, &t),
-                    (ir::ElemStep::Round, None) => self.tile_round(block, &t),
-                    (ir::ElemStep::Sqrt, None) => self.tile_sqrt(block, &t),
-                    (ir::ElemStep::Tanh, None) => self.tile_tanh(block, &t),
+                    (
+                        ir::ElemStep::Exp
+                        | ir::ElemStep::Log
+                        | ir::ElemStep::Round
+                        | ir::ElemStep::Sqrt
+                        | ir::ElemStep::Tanh,
+                        None,
+                    ) => self.tile_unary(block, &t, step),
                     (ir::ElemStep::Math(_), None) => {
                         let out = fresh(self)?;
                         let step = self.ir_elem_step(step);
@@ -404,7 +407,7 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    pub(super) fn ir_elem_step(&self, step: ir::ElemStep) -> ElemStep<'c> {
+    pub(in crate::codegen) fn ir_elem_step(&self, step: ir::ElemStep) -> ElemStep<'c> {
         match step {
             ir::ElemStep::Cast(s) => ElemStep::Cast(self.ir_scalar_type(s)),
             ir::ElemStep::Round => ElemStep::Round,
