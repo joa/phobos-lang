@@ -147,17 +147,17 @@ fn int_and_float_literals() {
 }
 
 #[test]
-fn tracks_line_and_column() {
+fn tracks_byte_spans() {
     let toks = Lexer::new("a\n  b").tokenize().unwrap();
-    assert_eq!((toks[0].line, toks[0].col), (1, 1)); // a
-    // toks[1] is the inserted terminator after a
-    assert_eq!(toks[1].tok, Tok::Semicolon);
-    // b is on line 2, column 3 (after two spaces)
+    assert_eq!(toks[0].span(), Span::new(0, 1)); // a
+    // toks[1] is the inserted terminator after a, empty at the newline
+    assert_eq!((&toks[1].tok, toks[1].span()), (&Tok::Semicolon, Span::new(1, 1)));
+    // b is past the newline and two spaces
     let b = toks
         .iter()
         .find(|t| t.tok == Tok::Ident("b".into()))
         .unwrap();
-    assert_eq!((b.line, b.col), (2, 3));
+    assert_eq!(b.span(), Span::new(4, 5));
 }
 
 #[test]

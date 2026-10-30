@@ -5,8 +5,6 @@ use super::token::{Tok, Token};
 pub struct Lexer<'a> {
     src: std::str::Chars<'a>,
     peek: Option<char>,
-    line: u32,
-    col: u32,
     /// The byte offset of `peek`.
     pos: u32,
 }
@@ -27,8 +25,6 @@ impl<'a> Lexer<'a> {
         Lexer {
             src: chars,
             peek,
-            line: 1,
-            col: 1,
             pos: 0,
         }
     }
@@ -38,14 +34,6 @@ impl<'a> Lexer<'a> {
         self.peek = self.src.next();
         if let Some(c) = c {
             self.pos += c.len_utf8() as u32;
-        }
-        match c {
-            Some('\n') => {
-                self.line += 1;
-                self.col = 1;
-            }
-            Some(_) => self.col += 1,
-            None => {}
         }
         c
     }
@@ -79,55 +67,27 @@ impl<'a> Lexer<'a> {
         let mut out: Vec<Token> = Vec::new();
         let mut errors = Vec::new();
         loop {
-            let (line, col, lo) = (self.line, self.col, self.pos);
+            let lo = self.pos;
             let Some(piece) = self.piece() else {
                 break;
             };
             match piece {
                 Piece::Newline if out.last().is_some_and(|t| Self::ends_stmt(&t.tok)) => {
-                    out.push(Token {
-                        tok: Tok::Semicolon,
-                        line,
-                        col,
-                        end_col: col,
-                        lo,
-                        hi: lo,
-                    });
+                    out.push(Token { tok: Tok::Semicolon, lo, hi: lo });
                 }
                 Piece::Newline | Piece::Space | Piece::Comment => {}
                 Piece::Bad(d) => errors.push(d),
-                Piece::Tok(tok) => out.push(Token {
-                    tok,
-                    line,
-                    col,
-                    end_col: self.col,
-                    lo,
-                    hi: self.pos,
-                }),
+                Piece::Tok(tok) => out.push(Token { tok, lo, hi: self.pos }),
             }
         }
         if !errors.is_empty() {
             return Err(errors);
         }
-        let (line, col, at) = (self.line, self.col, self.pos);
+        let at = self.pos;
         if out.last().is_some_and(|t| Self::ends_stmt(&t.tok)) {
-            out.push(Token {
-                tok: Tok::Semicolon,
-                line,
-                col,
-                end_col: col,
-                lo: at,
-                hi: at,
-            });
+            out.push(Token { tok: Tok::Semicolon, lo: at, hi: at });
         }
-        out.push(Token {
-            tok: Tok::Eof,
-            line,
-            col,
-            end_col: col,
-            lo: at,
-            hi: at,
-        });
+        out.push(Token { tok: Tok::Eof, lo: at, hi: at });
         Ok(out)
     }
 

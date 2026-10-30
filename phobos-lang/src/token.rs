@@ -127,10 +127,6 @@ impl std::fmt::Display for Tok {
 #[derive(Debug, Clone)]
 pub struct Token {
     pub tok: Tok,
-    pub line: u32,
-    pub col: u32,
-    /// The column just past the token, which never spans lines.
-    pub end_col: u32,
     /// The token's bytes in the source, `hi` exclusive.
     pub lo: u32,
     pub hi: u32,
