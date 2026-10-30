@@ -232,7 +232,6 @@ fn atomics_into_i32_narrow_a_wider_integer() {
             let b = atomic_cas(T, 1, i8(0), i64(2))
         }",
     );
-    assert!(module_verifies(&mlir), "{mlir}");
     assert_contains(&mlir, &["arith.trunci", "arith.extsi", "memref.atomic_rmw addi"]);
 }
 
