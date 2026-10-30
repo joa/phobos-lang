@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use super::owner::{Owner, Owners};
-use crate::ir::build::alloc_align_div;
 use crate::ir::{Ir, Layout, OpId, OpKind, Space, TileType, Type, ValueId};
+use crate::shape::alloc_align_div;
 
 /// What held scratch may take of a block's shared memory, the static limit.
 const HELD_BUDGET_BYTES: i64 = 48 * 1024;

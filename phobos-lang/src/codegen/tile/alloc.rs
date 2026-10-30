@@ -35,15 +35,12 @@ impl<'c> Codegen<'c> {
             let name = format!("__{}_tile{}", self.kernel_name, k);
             let mem = self.planned_view(block, t.into(), offset, plan.peak)?;
             let mem = self.assume_align(block, mem, 16)?;
-            let align_div = row_major_strides(shape)[..shape.len() - 1]
-                .iter()
-                .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
             return Ok(MemVal {
                 mem,
                 elem,
                 shape: shape.to_vec(),
                 row_stride: None,
-                align_div,
+                align_div: alloc_align_div(shape),
                 swizzle: None,
                 global: Some(name),
                 shared: true,
@@ -112,10 +109,6 @@ impl<'c> Codegen<'c> {
 
         let mem = self.assume_align(block, mem, 16)?;
 
-        let align_div = row_major_strides(shape)[..shape.len() - 1]
-            .iter()
-            .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
-
         if self.dynamic_shared {
             self.dynamic_live += 1;
         }
@@ -125,7 +118,7 @@ impl<'c> Codegen<'c> {
             elem,
             shape: shape.to_vec(),
             row_stride: None,
-            align_div,
+            align_div: alloc_align_div(shape),
             swizzle: None,
             global: Some(name),
             shared: true,

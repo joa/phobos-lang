@@ -26,6 +26,7 @@ use crate::ast::{Dim, Type as AstType};
 use crate::codegen::Planned;
 use crate::ir::OpKind;
 use crate::ir::uniform::{self, Kind};
+use crate::shape::row_major_strides;
 pub use model::{Cta, Origin, Trace, Variant};
 use model::{Role, Uniformity};
 
@@ -321,7 +322,7 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
             model::Tensor {
                 elem_bytes: elem.bytes().unwrap_or(4),
                 elem: elem.mlir_name().to_string(),
-                strides: dense_strides(&shape),
+                strides: row_major_strides(&shape),
                 shape,
                 role,
                 name,
@@ -380,15 +381,6 @@ fn summarize(s: model::Step) -> Option<model::Summary> {
         reads,
         writes,
     })
-}
-
-/// Row-major strides, in elements, of a dense tensor of `shape`.
-fn dense_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1; shape.len()];
-    for d in (0..shape.len().saturating_sub(1)).rev() {
-        strides[d] = strides[d + 1] * shape[d + 1];
-    }
-    strides
 }
 
 /// A short stable name for an op's kind.

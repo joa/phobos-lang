@@ -10,6 +10,7 @@ use melior::ir::operation::OperationLike;
 use melior::ir::{BlockLike, Location, OperationRef, RegionLike, Value, ValueLike};
 
 use super::Loc;
+use crate::shape::lcm;
 
 /// A value's index in [`Program::values`].
 pub(super) type Vid = usize;
@@ -210,22 +211,14 @@ fn aligned(ops: &[Op], params: &[(Vid, Ty)]) -> HashMap<(Vid, usize), i64> {
                     (dims.get(&op.operands[0]), consts.get(&op.operands[1]))
                     && c > 0
                 {
-                    let lcm = out.get(&dim).map_or(c, |&e| lcm(e, c));
-                    out.insert(dim, lcm);
+                    let multiple = out.get(&dim).map_or(c, |&e| lcm(e, c));
+                    out.insert(dim, multiple);
                 }
             }
             _ => {}
         }
     }
     out
-}
-
-fn lcm(a: i64, b: i64) -> i64 {
-    let (mut x, mut y) = (a, b);
-    while y != 0 {
-        (x, y) = (y, x % y);
-    }
-    a / x * b
 }
 
 struct Builder {

@@ -39,6 +39,7 @@ pub(crate) use super::at_op::locate;
 pub(crate) use decl::Decl;
 pub(crate) use params::GRID_BARRIER_NAME;
 pub(crate) use crate::shape::DYN;
+use crate::shape::{alloc_align_div, fmt_shape, gcd};
 
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
@@ -668,19 +669,6 @@ pub(crate) fn extent(d: i64) -> Extent {
     if d == DYN { Extent::Dyn } else { Extent::Fixed(d) }
 }
 
-/// The alignment `alloc_tile_shaped` proves for a fresh buffer: the gcd of
-/// its row-major strides above the innermost.
-pub(crate) fn alloc_align_div(shape: &[i64]) -> i64 {
-    row_major_strides(shape)[..shape.len() - 1]
-        .iter()
-        .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)))
-}
-
-pub(crate) fn gcd(a: i64, b: i64) -> i64 {
-    let (a, b) = (a.abs(), b.abs());
-    if b == 0 { a } else { gcd(b, a % b) }
-}
-
 pub(crate) fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
     if a.len() != b.len() {
         return None;
@@ -712,25 +700,4 @@ pub(crate) fn dim_in_bounds(extent: i64, size: i64, off_div: i64, start: Option<
         return true;
     }
     extent % size == 0 && off_div % size == 0
-}
-
-/// Row-major strides for a shape ([`DYN`] propagates outward).
-pub(crate) fn row_major_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1i64; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        strides[i] = if shape[i + 1] == DYN || strides[i + 1] == DYN {
-            DYN
-        } else {
-            strides[i + 1] * shape[i + 1]
-        };
-    }
-    strides
-}
-
-pub(crate) fn fmt_dim(d: i64) -> String {
-    if d == DYN { "?".to_string() } else { d.to_string() }
-}
-
-pub(crate) fn fmt_shape(shape: &[i64]) -> String {
-    shape.iter().map(|&d| fmt_dim(d)).collect::<Vec<_>>().join("x")
 }

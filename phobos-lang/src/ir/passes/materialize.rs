@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use crate::diag::Span;
-use crate::ir::build::{alloc_align_div, extent};
+use crate::ir::build::extent;
 use crate::ir::{
     At, BinOp, Bounds, Builder, ForInfo, Ir, Layout, OpId, OpKind, Scalar, Space, ThreadIndex, TileType, Type,
 };
+use crate::shape::alloc_align_div;
 
 /// Materializes every `generate` read by anything but a fragment update.
 pub(super) fn leftovers(ir: &mut Ir, spans: &mut BTreeMap<OpId, Span>) {

@@ -4,6 +4,44 @@
 /// MLIR's ShapedType::kDynamic.
 pub(crate) const DYN: i64 = i64::MIN;
 
+pub(crate) fn gcd(a: i64, b: i64) -> i64 {
+    let (a, b) = (a.abs(), b.abs());
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+pub(crate) fn lcm(a: i64, b: i64) -> i64 {
+    a / gcd(a, b) * b
+}
+
+/// Row-major strides for a shape ([`DYN`] propagates outward).
+pub(crate) fn row_major_strides(shape: &[i64]) -> Vec<i64> {
+    let mut strides = vec![1i64; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = if shape[i + 1] == DYN || strides[i + 1] == DYN {
+            DYN
+        } else {
+            strides[i + 1] * shape[i + 1]
+        };
+    }
+    strides
+}
+
+/// The alignment `alloc_tile_shaped` proves for a fresh buffer: the gcd of
+/// its row-major strides above the innermost.
+pub(crate) fn alloc_align_div(shape: &[i64]) -> i64 {
+    row_major_strides(shape)[..shape.len() - 1]
+        .iter()
+        .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)))
+}
+
+pub(crate) fn fmt_dim(d: i64) -> String {
+    if d == DYN { "?".to_string() } else { d.to_string() }
+}
+
+pub(crate) fn fmt_shape(shape: &[i64]) -> String {
+    shape.iter().map(|&d| fmt_dim(d)).collect::<Vec<_>>().join("x")
+}
+
 /// Elements a padded staging tile adds to each row: eight, the WMMA pad,
 /// or 16 bytes when that is more, so a narrow type's rows stay 16-byte
 /// aligned for vector copies and `ldmatrix`.
@@ -60,7 +98,7 @@ pub(crate) fn imma_plan(m: i64, n: i64, cta_threads: i64) -> Option<(i64, i64)> 
 
 /// The most 8x8 tiles one warp carries, two f32 a lane each: the patch
 /// `qmma_t` caps at, beyond which the registers spill.
-const IMMA_WARP_TILES: i64 = 64;
+pub(crate) const IMMA_WARP_TILES: i64 = 64;
 
 fn warp_grid(gm: i64, gn: i64, cta_threads: i64) -> Option<(i64, i64)> {
     let warps = cta_threads / 32;

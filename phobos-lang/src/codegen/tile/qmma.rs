@@ -1,6 +1,7 @@
 // The Q8_0 tensor-core matmul used by a prompt's projections.
 
 use super::*;
+use crate::shape::IMMA_WARP_TILES;
 
 impl<'c> Codegen<'c> {
     /// The warp's patch of `m8n8k16` tiles: how many down, how many across.
@@ -12,7 +13,7 @@ impl<'c> Codegen<'c> {
     pub(super) fn qmma_patch(&self, rt: i64, ct: i64) -> (i64, i64) {
         let warps = self.cta_threads / WARP;
         let (mut rm, mut rn) = (1, 1);
-        while rm * rn < QMMA_TILES {
+        while rm * rn < IMMA_WARP_TILES {
             let grow_rows = rm < rn;
             let (try_m, try_n) = if grow_rows {
                 (rm * 2, rn)
@@ -27,7 +28,7 @@ impl<'c> Codegen<'c> {
                 } else {
                     (rm * 2, rn)
                 };
-                if alt_m * alt_n <= QMMA_TILES
+                if alt_m * alt_n <= IMMA_WARP_TILES
                     && rt % alt_m == 0
                     && ct % alt_n == 0
                     && (rt / alt_m) * (ct / alt_n) >= warps
