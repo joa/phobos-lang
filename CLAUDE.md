@@ -32,7 +32,10 @@ helpers rather than a spelling of its own.
   The cap drops to 700 the day it is empty
 
 ## Verifying changes
-- `cargo test`: the whole enchilada
+- `cargo test`: the whole enchilada but phobos-pod and phobos-kbench, which
+  link the CUDA driver at build time and so are not default members;
+  `cargo test --workspace` takes them too, on a machine with the toolkit or the
+  stand-in driver below
 - `cargo test -p phobos-lang`: parser + codegen tests; codegen tests run the MLIR verifier on emitted modules and grep the printed IR. `tests/ui/*.ph` each fail to compile, and what the compiler prints for them, rustc's layout, uncolored, is the `.stderr` beside them; a change to a message reblesses them with `PHOBOS_BLESS=1` and the diff is reviewed
 - `cargo test -p phobos-gguf -p phobos-onnx -p phobos-inference -p phobos-kernels`: the front ends, the host reference paths, the tokenizers, the chat rendering and the sampler. No GPU, no MLIR toolchain
 - `python scripts/ci/cuda_stub.py DIR`, then `CUDA_LIBRARY_PATH=DIR` and
@@ -46,7 +49,9 @@ helpers rather than a spelling of its own.
   default never takes: mma.sync and cp.async both want 64-bit indices, and the
   two diverge again between sm_75 and sm_80. A refactor of a code generator that
   changes the generated code is not a refactor, so diff this over every `.ph` in
-  the tree, under each of those targets, before and after
+  the tree, under each of those targets, before and after: the `snapshot`
+  example (`-- OUT_DIR SRC_DIR...`) is that sweep, every source under every
+  target into one directory to diff
 - `cargo run --release -p phobos-lang --example race -- [-v] PATH...`: the
   shared-memory race check, on the host. It runs every thread of a CTA through
   the MLIR as emitted, so it checks the barriers the membar pass kept and
@@ -68,7 +73,10 @@ helpers rather than a spelling of its own.
   the visualizer's traces from `website/kernels.json` and the docs' `trace`
   fences; a change to a traced kernel, or to codegen that moves a trace,
   regenerates them in the same change. `-- attributes` refreshes the attribute
-  list the docs are checked against
+  list the docs are checked against, and `-- stubs` the Python package's editor
+  stubs (`python/phobos/lang.pyi`), which a change to the built-ins regenerates.
+  The binaries' `--help` the site shows is captured by
+  `node website/scripts/capture-cli.mjs`
 - `npm run check` in `website/`: the site's tests and type checks, as CI runs them
 - `python -m unittest discover -s python/tests -t python`: the Python front end, the
   launcher and the autotuner's host side, against a release `phobos-compile`,
@@ -132,11 +140,11 @@ remembered figure and has to be labelled as such.
 - **phobos-cluster**: distributed execution codegen and utils
 - **phobos-sched**: global scheduler
 - **phobos-pod**: node runtime
-- **phobos-kernels**: what both front ends need to reach a GPU: the launch ABI, the compile step, the launcher, the allocation pool and the plain f32 matmul. The `cuda` feature gates everything that talks to the driver, so the ABI and the kernel sources still compile without one
-- **phobos-gguf**: GGUF container, byte-level BPE, the `qwen35` and `llama` forward passes, `quant/` with one file per quantized format behind a `Quant`/`Spec` registry, and `backend/` with the host and device implementations plus `fuse/`, the pass that lowers a chain of decode stages into one persistent kernel. A format with no kernel dequantizes at upload and takes the dense path, so a new one lands correct before it lands fast
-- **phobos-onnx**: ONNX proto -> graph IR -> shape inference, folding, fusion -> Phobos kernels, and `backend/` with the host interpreter as the oracle alongside the device paths
-- **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server, plus `telemetry::Meter`, the shared record the engine writes progress into and a viewer reads snapshots of. What a front end can report about itself, and what it cannot, is the default-`None` half of the `Model` trait: `footprint`, `device_memory`, `device_info`, `architecture`, `cache_stats`, and `Session::truncate`, whose default accepts only the request that drops nothing, so a backend that cannot rewind still gets prefix reuse by extension
-- **website**: phobos-lang.dev, Astro + Starlight, deployed to GitHub Pages by `.github/workflows/website.yml` with Node only. `SPEC.md`, `ENV.md`, `BENCHMARKS.md` and `WINDOWS.md` render in place, so they stay the source; everything the compiler produces for the site (traces, CLI help, attribute list, expected errors, rendered diagnostics) is generated with the toolchain and committed under `website/src/data/`
+- **phobos-kernels**: what both front ends need to reach a GPU: the launch ABI, the compile step, the launcher, the allocation pool and the plain f32 matmul. The `cuda` feature gates everything that talks to the driver, so the ABI and the kernel sources still compile without one; the `compiler` feature, which `cuda` implies and phobos-compile and phobos-cache take alone, is everything short of the driver: lowering, the PTX cache and the manifest
+- **phobos-gguf**: GGUF container, byte-level BPE, the `qwen35`, `llama` and `glm4` forward passes over the shared blocks in `layers/`, `quant/` with one file per quantized format behind a `Quant`/`Spec` registry, and `backend/` with the host and device implementations plus `fuse/`, the pass that lowers a chain of decode stages into one persistent kernel. A format with no kernel dequantizes at upload and takes the dense path, so a new one lands correct before it lands fast. A mixture of experts streams its experts through `experts/`, computing the misses on the host's vector kernels in `simd/`; `tune/` keeps the prompt batch each card measured
+- **phobos-onnx**: ONNX proto -> graph IR -> constant folding and LayerNorm fusion -> the host interpreter, with its matmuls on Phobos kernels on the device (`backend/device.rs`). `lower.rs` and `backend/chain.rs`, a lowering of whole graphs to Phobos kernels, run only from the examples
+- **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server, plus `telemetry::Meter`, the shared record the engine writes progress into and a viewer reads snapshots of. What a front end can report about itself, and what it cannot, is the default-`None` half of the `Model` trait: `footprint`, `device_memory`, `device_info`, `architecture`, `cache_stats`, `sensors`, `Session::cache_bytes`, and `Session::truncate`, whose default accepts only the request that drops nothing, so a backend that cannot rewind still gets prefix reuse by extension
+- **website**: phobos-lang.dev, Astro + Starlight, deployed to GitHub Pages by `.github/workflows/website.yml` with Node only. `SPEC.md`, `ENV.md`, `BENCHMARKS.md`, `WINDOWS.md` and `python/README.md` render in place, so they stay the source; everything the compiler produces for the site (traces, CLI help, attribute list, expected errors, rendered diagnostics) is generated with the toolchain and committed under `website/src/data/`
 - **python**: the `phobos` package. `phobos.lang` spells Phobos in Python: the
   front end (`frontend.py`) reads a `@ph.kernel`'s source and writes the Phobos it
   spells with a span map, which `phobos-compile --origin` holds at the

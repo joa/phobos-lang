@@ -38,12 +38,12 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_KERNEL_CACHE_DIR` | a directory, or empty | `kernel-cache` beside the binary, read-only, then `~/.phobos/kernel-cache` | Where compiled PTX is cached across processes, one subdirectory per chip (`sm_75/`, `sm_86/`, ...). A release ships its cache beside the binary; new entries go to the user's. Set, it is the one cache read and written; empty turns caching off. `phobos-compile` reads and writes it as the runtime does, and the Python autotuner keeps its winners there, under `<chip>/autotune/`, as the runtime keeps its prompt batch under `<chip>/tuning/`. |
 | `PHOBOS_KERNEL_MANIFEST` | a directory | unset | Records every kernel compile request, hit or miss, into that directory, one file each, without the chip. `phobos-cache warm --manifest DIR` compiles them for every supported chip with no GPU. A GGUF run on the device compiles every format's kernels while it records, not just its model's, so the manifest covers formats no recorded model holds. |
 | `PHOBOS_KERNEL_CACHE_EPOCH` | any string | the compiler's build fingerprint | Replaces the fingerprint that keys the cache, so a stale cache can be forced cold or two builds made to share one. |
-| `PHOBOS_CHIP` | an SM target, `sm_75`, `sm_80` | the newest supported chip the card runs, or the context default | The target kernels compile for: on the device path, in `phobos-kbench` and in the Python package, in place of the card's, and in `phobos-lang`'s `emit` and `ir` examples, to reach a code path the default never takes. |
+| `PHOBOS_CHIP` | an SM target, `sm_75`, `sm_80` | the newest supported chip the card runs, or the context default | The target kernels compile for: on the device path, in `phobos-kbench` and in the Python package, in place of the card's, and in `phobos-lang`'s `emit`, `race` and `ir` examples, to reach a code path the default never takes. |
 | `PHOBOS_INDEX_BITS` | `32` or `64` | `32`, widened to 64 by a kernel that wants `ldmatrix` | The index width those examples compile with; `mma.sync` and `cp.async` want 64. |
 | `PHOBOS_PRINT_PHASES` | opt-in | off | `phobos-compile` prints each lowering phase's IR. |
 | `PHOBOS_NVVM` | opt-out | on | LLVM IR goes to PTX through the CUDA toolkit's libNVVM, found under `CUDA_PATH` or `CUDA_HOME` (or `/usr/local/cuda`), for every chip it reads this LLVM's IR for: CUDA 13.3 does from `compute_100` on, so of the supported chips only `sm_120`. Other chips, or a machine without the toolkit, take LLVM's NVPTX backend, as does a module libNVVM rejects. The cache does not key on it: an entry libNVVM wrote serves every machine, `phobos-cache warm` included, unless this is off, and an entry NVPTX wrote for a chip libNVVM would compile is compiled again. |
-| `PHOBOS_COMPILE` | a path | `phobos-compile` on the PATH, else the one beside `python/` in a release, else this checkout's `target/release` build | The compiler the Python package (`python/phobos`) runs. |
-| `PHOBOS_DUMP_DIR` | a directory | unset | Codegen tests and the raw-format kernel dump write every kernel source they compile there as `.ph`, so the emit sweep covers them. |
+| `PHOBOS_COMPILE` | a path | `phobos-compile` on the PATH, else the one beside `python/` in a release, else this checkout's `target/release` build, then its `target/debug` one | The compiler the Python package (`python/phobos`) runs. |
+| `PHOBOS_DUMP_DIR` | a directory | unset | Every source `phobos_lang::compile_source` compiles is written there as `.ph`, in any process, so a model run dumps the kernels it compiles; the codegen tests and the raw-format kernel dump write theirs too, so the emit sweep covers them. |
 | `PHOBOS_SNAPSHOT_SRC` | a directory | unset | The IR builder's test walks every source there and checks each builds, or fails where its `.err` says it should. Skipped without it. |
 | `PHOBOS_BLESS` | opt-in | off | `phobos-lang`'s UI tests (`tests/ui`), and the Python package's (`python/tests/ui`), rewrite each `.stderr` with what the compiler prints now instead of comparing against it. |
 
@@ -69,7 +69,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_FUSED_MIX` | opt-out | on | The delta net's convolution and gates as the tail of the fused projection; costs a barrier, so gated apart. |
 | `PHOBOS_FUSED_ATTN_OUT` | opt-out | on | Attention's output epilogue (quantize, output projection into the residual) as one kernel. |
 | `PHOBOS_FUSED_STORE2D` | opt-out | on | Attention's key and value cache writes in one launch instead of two. |
-| `PHOBOS_DELTA_SCAN` | opt-out | on | A prompt's gated delta rule as the register-state scan (`delta_scan_t`), one pass over the positions with the state in registers. Off, the chunked form (`delta_wy` and `delta_scan`). |
+| `PHOBOS_DELTA_SCAN` | opt-out | on | A prompt's gated delta rule as the register-state scan (`delta_scan_reg`), one pass over the positions with the state in registers. Off, the chunked form (`delta_wy` and `delta_scan`). |
 | `PHOBOS_ATTN_FLASH` | opt-out | on | The flash prompt attention on the tensor cores: the scores of each key step held in registers and never written out, for a prompt whose rows and cache depth tile by 64. Off, `PHOBOS_ATTN_TC`'s path. |
 | `PHOBOS_ATTN_FLASH_SHAPE` | `streamed` or `resident`, then a key step dividing 64, then `p` to assert the pipeline, e.g. `resident16p` | the chip's | The flash kernel's form and key step, for a sweep without a rebuild. Streamed stages the queries and keys a contraction step at a time; resident holds the query tile and stages each key tile the full head wide. sm_86, sm_89 and sm_120 take `resident16`, every other chip `streamed32`. |
 | `PHOBOS_ATTN_TC` | opt-out | on | The tensor-core prompt attention where flash does not take it: every head's scores written out, a softmax in place, and the mix, for a prompt whose rows, cache depth and head dimension tile by 64, in slabs of rows and heads whose scores fit 128 MiB. Off, the blocked kernel. |
@@ -84,7 +84,6 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_QMMA_NARROW` | opt-in | off | The narrow-CTA form of the Q8_0 prompt projection's deep tile. Wins at pp128, regresses pp512 on some models; opt-in for that reason. |
 | `PHOBOS_QMMA_TILE` | `TMxTNxCTA`, e.g. `128x64x256` | the format's | The fused prompt projection's tile and CTA, for a sweep without a rebuild. Each distinct value is a distinct compiled kernel. |
 | `PHOBOS_QMMA_STAGE` | opt-out | on | The staged (shared-memory) form of IQ1_S's fused projection. `0` goes back to the register form. |
-| `PHOBOS_QDOT_I8_CTA` | threads | 256 | Threads those matvecs launch with, clamped so a warp's columns fill the CTA whole. Wider reads faster alone and loses in the model. |
 | `PHOBOS_ATTN_PREP` | opt-out | on | A decode row's query and key normalization, rotation, gate split and cache stores run as two launches, one program per head. Off, they run as the eight separate ops. |
 | `PHOBOS_GATE_Q` | opt-out | on | Attention's output gate writes the quantized copy the output projection reads in the same launch. Off, the gate and the quantization are two launches. |
 | `PHOBOS_QDOT_SPLIT` | opt-out | on | A K-quant decode matvec over a `k` of 4096 or more whose tiles give fewer than two programs a multiprocessor splits along `k` into partials and a sum. Off, one program per tile walks all of `k`. |
@@ -116,10 +115,11 @@ prints each step.
 
 The mixture-of-experts path (`qwen35moe`) keeps a model's experts in a
 pinned host cache as large as `--max-ram` allows, the file mapping behind
-it, and a device cache; see `docs/MOE-QWEN36-35B-A3B.md` for
-the design and every measurement behind these defaults, on an RTX 2080
-SUPER whose PCIe link runs at x8. The two on by default won the prompt pass
-there; the two opt-ins lost and exist for a wider bus or a faster host.
+it, and a device cache; see [Mixture of Experts](BENCHMARKS.md#mixture-of-experts)
+for what these defaults measure on an RTX 2080 SUPER whose PCIe link runs
+at x8. The three on by default won there, the first two in the prompt pass
+and the third in decode; the opt-in lost and exists for a wider bus or a
+faster host.
 
 | variable | takes | default | effect |
 | --- | --- | --- | --- |

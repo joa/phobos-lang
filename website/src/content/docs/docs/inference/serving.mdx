@@ -29,8 +29,15 @@ request at a time; others wait their turn.
 | `GET /v1/models` | Lists the one loaded model. |
 | `GET /` | Answers `phobos-inference`, as a health check. |
 
-Any other path answers `404` and is noted in the server's log. The server
-does not check API keys, so a client may send any.
+Any other path answers `404` and is noted in the server's log.
+
+## Authentication
+
+Started with `--api-key KEY`, or with `PHOBOS_API_KEY` set, the server answers
+every route with `401` unless the request carries `Authorization: Bearer KEY`.
+Without a key it checks none, so a client may send any; anyone who can reach
+the address can then run inference, and the server warns when it is bound to
+an address other than loopback with no key set.
 
 The model's id in `/v1/models` is a label of the form `GGUF, <architecture>`.
 A request can name any model; the response echoes the name it was sent, and

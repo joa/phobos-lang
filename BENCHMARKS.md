@@ -448,7 +448,7 @@ call that computes the same thing:
 
 | kind | A, B | C | multiply | accumulate | cuBLAS |
 |---|---|---|---|---|---|
-| `gemm_fp32`, `gemm_fp32_unaligned` | f32 | f32 | f32 | f32 | `cublasSgemm` |
+| `gemm_fp32`, `gemm_fp32_unaligned`, `gemm_fp32_splitk` | f32 | f32 | f32 | f32 | `cublasSgemm` |
 | `gemm_fp16_fp32acc` | f16 | f32 | f16 tensor cores | f32 | `cublasGemmEx` 16F/32F, `COMPUTE_32F` |
 | `gemm_fp16tc_fp32acc` | f32, rounded while staging | f32 | f16 tensor cores | f32 | the same, after converting A and B, the conversion timed in |
 | `gemm_fp16` | f16 | f16 | f16 tensor cores | f16 | `cublasGemmEx` 16F/16F, `COMPUTE_16F` |

@@ -154,7 +154,10 @@ files in [`examples/`](https://github.com/joa/phobos-lang/tree/main/examples):
 | --- | --- | --- |
 | `saxpy_fp32` | `saxpy_fp32.ph` | `out = alpha * x + y` |
 | `gemm_fp32` | `gemm_fp32.ph` | f32 matrix multiply |
+| `gemm_fp32_unaligned` | `gemm_fp32_unaligned.ph` | the same for sizes no tile divides |
+| `gemm_fp32_splitk` | `gemm_fp32_splitk.ph` | the same with the k-loop split across blocks and summed |
 | `gemm_fp16tc_fp32acc` | `gemm_fp16tc_fp32acc.ph` | the same on tensor cores, f16 operands, f32 accumulation |
+| `gemm_fp16_fp32acc` | `gemm_fp16_fp32acc.ph` | f16 inputs on tensor cores, f32 accumulation and output |
 | `gemm_fp16` | `gemm_fp16.ph` | f16 inputs, output and accumulation |
 | `flash_fp32` | `flash_attention_fp32.ph` | attention with an online softmax |
 | `flash_fp16` | `flash_attention_fp16.ph` | f16 Q, K, V and O, f32 softmax state |

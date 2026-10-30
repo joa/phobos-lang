@@ -17,6 +17,23 @@ members = [
     "phobos-pod",
     "phobos-sched",
 ]
+# phobos-pod and phobos-kbench link the CUDA driver at build time, so a plain
+# `cargo build` or `cargo test` leaves them out; `--workspace` takes them.
+default-members = [
+    "phobos-base",
+    "phobos-bench",
+    "phobos-cache",
+    "phobos-cli",
+    "phobos-cluster",
+    "phobos-compile",
+    "phobos-gguf",
+    "phobos-inference",
+    "phobos-kernels",
+    "phobos-lang",
+    "phobos-mlir",
+    "phobos-onnx",
+    "phobos-sched",
+]
 
 [profile.release.package.phobos-gguf]
 codegen-units = 1
@@ -25,7 +42,7 @@ codegen-units = 1
 version = "0.3.0"
 edition = "2024"
 readme = "README.md"
-repository = "https://github.com/joa/phobos"
+repository = "https://github.com/joa/phobos-lang"
 license = "Apache-2.0"
 keywords = ["llvm", "mlir", "compiler", "gpu", "kernel"]
 
