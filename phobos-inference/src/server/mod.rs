@@ -5,7 +5,7 @@ pub mod protocol;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::State,
@@ -250,11 +250,18 @@ pub fn serve(
         None if auth::is_exposed(&addr) => meter.log(
             Level::Info,
             format!(
-                "WARNING: {addr} is not a loopback address and no API key is set, so anyone                  who can reach it can run inference (see --api-key)"
+                "WARNING: {addr} is not a loopback address and no API key is set, so anyone \
+                 who can reach it can run inference (see --api-key)"
             ),
         ),
         None => {}
     }
+
+    // Bound here, not in the server's thread, so an address in use fails the
+    // call before the upload instead of panicking in a thread after it.
+    let listener = std::net::TcpListener::bind(&addr).with_context(|| format!("cannot listen on {addr}"))?;
+    listener.set_nonblocking(true)?;
+    let bound = listener.local_addr()?;
 
     let serving = meter.clone();
     std::thread::spawn(move || {
@@ -276,9 +283,18 @@ pub fn serve(
                 app = app.layer(axum::middleware::from_fn_with_state(key, auth::require_key));
             }
 
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-            serving.log(Level::Info, format!("listening on http://{addr}"));
-            axum::serve(listener, app).await.unwrap();
+            let served = match tokio::net::TcpListener::from_std(listener) {
+                Ok(listener) => {
+                    serving.log(Level::Info, format!("listening on http://{bound}"));
+                    axum::serve(listener, app).await
+                }
+                Err(e) => Err(e),
+            };
+            // Ending the thread drops the request channel, which the worker
+            // below reports.
+            if let Err(e) = served {
+                serving.log(Level::Info, format!("the server stopped: {e}"));
+            }
         });
     });
 
@@ -307,7 +323,7 @@ pub fn serve(
                 meter.set_cache_stats(model.cache_stats());
                 continue;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("the HTTP server stopped"),
         };
         let req = inf_req.req;
         let responder = inf_req.responder;
@@ -316,6 +332,12 @@ pub fn serve(
             continue;
         }
 
+        // The loop emits a token before it checks the limit, so zero would
+        // answer with one.
+        if req.max_tokens == Some(0) {
+            let _ = responder.send(Ok(InferenceResponse::Rejected("max_tokens must be at least 1".to_string())));
+            continue;
+        }
         let mut rng = Rng::new(req.seed.unwrap_or(defaults.seed));
         let Ok(ids) = model.tokenizer().encode(&req.prompt) else {
             let _ = responder.send(Err("Failed to encode prompt".to_string()));
