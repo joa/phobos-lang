@@ -5,11 +5,12 @@
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use phobos_base::cli::format_size;
 use phobos_base::phinfo;
 use phobos_cluster::isa::InstrId;
 use phobos_cluster::tile::TileId;
 
-use super::{Engine, human};
+use super::Engine;
 
 impl Engine {
     pub(super) fn try_alloc(&mut self, iid: InstrId, tile: TileId, shape: Vec<u64>) -> Result<bool> {
@@ -60,7 +61,7 @@ impl Engine {
             "node{}: SERVE tile={:#x} {} -> peer (D2H)",
             self.node_id,
             tile.0,
-            human(data.len() * 4),
+            format_size(data.len() as u64 * 4),
         );
         let _ = reply.send(Some(data));
         self.store.record_serve(tile)?;
@@ -102,7 +103,7 @@ impl Engine {
 
         let stuck = std::mem::take(&mut self.deferred_allocs);
         for (iid, tile, shape) in stuck {
-            let bytes = shape.iter().product::<u64>() as usize * 4;
+            let bytes = shape.iter().product::<u64>() * 4;
             self.fail(
                 iid,
                 format!(
@@ -110,7 +111,7 @@ impl Engine {
                      set already fills the arena; raise the node's --arena, or lower \
                      SUPER_*/the scheduler memory budget",
                     tile.0,
-                    human(bytes),
+                    format_size(bytes),
                 ),
             );
         }

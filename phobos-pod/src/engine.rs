@@ -15,6 +15,7 @@ use cust::stream::{Stream, StreamFlags};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+use phobos_base::cli::format_size;
 use phobos_base::{phdebug, phinfo};
 use phobos_cluster::isa::{InstrId, Op, Segment};
 use phobos_cluster::tile::{AccessMode, NodeId, TileId};
@@ -236,7 +237,7 @@ impl Engine {
                     "node{}: H2D tile={:#x} {} uploaded to VRAM (resident)",
                     self.node_id,
                     tile.0,
-                    human(data.len() * 4),
+                    format_size(data.len() as u64 * 4),
                 );
                 self.on_resident(tile)?;
                 self.complete(iid)?;
@@ -404,17 +405,5 @@ impl Engine {
         for c in self.completions.drain(..) {
             let _ = self.complete_sink.send(c);
         }
-    }
-}
-
-fn human(bytes: usize) -> String {
-    const MIB: usize = 1 << 20;
-    const KIB: usize = 1 << 10;
-    if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }

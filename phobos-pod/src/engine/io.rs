@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 
+use phobos_base::cli::format_size;
 use phobos_base::phinfo;
 use phobos_cluster::isa::{InstrId, StorageRef};
 use phobos_cluster::proto::tile_server_client::TileServerClient;
@@ -10,7 +11,7 @@ use phobos_cluster::proto::{KernelHash, TileRequest};
 use phobos_cluster::storage;
 use phobos_cluster::tile::{NodeId, TileId};
 
-use super::{Engine, EngineMsg, human};
+use super::{Engine, EngineMsg};
 
 const CHUNK: usize = 1 << 20; // 1 MiB tile-server chunks
 
@@ -39,7 +40,7 @@ impl Engine {
                     phinfo!(
                         "node{node}: LOAD #{iid} tile={:#x} read {} ({} f32) from {uri}",
                         tile.0,
-                        human(data.len() * 4),
+                        format_size(data.len() as u64 * 4),
                         data.len(),
                     );
                     let _ = to.send(EngineMsg::IoDone { iid, tile, data });
@@ -69,14 +70,14 @@ impl Engine {
             "node{}: D2H tile={:#x} {} read back from VRAM, writing to {}",
             self.node_id,
             tile.0,
-            human(data.len() * 4),
+            format_size(data.len() as u64 * 4),
             meta.uri,
         );
 
         let to = self.to_self.clone();
         let node = self.node_id;
         let uri = meta.uri.clone();
-        let nbytes = data.len() * 4;
+        let nbytes = data.len() as u64 * 4;
 
         self.outstanding_io += 1;
         self.rt.spawn(async move {
@@ -88,7 +89,7 @@ impl Engine {
 
             match res {
                 Ok(()) => {
-                    phinfo!("node{node}: STORE #{iid} wrote {} to {uri}", human(nbytes));
+                    phinfo!("node{node}: STORE #{iid} wrote {} to {uri}", format_size(nbytes));
                     let _ = to.send(EngineMsg::StoreDone { iid });
                 }
                 Err(e) => {
@@ -118,7 +119,7 @@ impl Engine {
                     phinfo!(
                         "node{node}: FETCH #{iid} tile={:#x} received {} from peer {addr}",
                         tile.0,
-                        human(data.len() * 4),
+                        format_size(data.len() as u64 * 4),
                     );
                     let _ = to.send(EngineMsg::IoDone { iid, tile, data });
                 }

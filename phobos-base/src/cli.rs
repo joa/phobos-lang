@@ -151,9 +151,22 @@ pub fn parse_size(text: &str) -> Result<u64> {
     Ok((value * scale) as u64)
 }
 
+/// A count of bytes as the tools print one: to one decimal, in the largest
+/// binary unit up to GiB that keeps the figure at least one (`1.5 MiB`).
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Args, parse_size};
+    use super::{Args, format_size, parse_size};
 
     fn args(xs: &[&str]) -> Args {
         Args::new(xs.iter().map(|s| s.to_string()))
@@ -266,5 +279,13 @@ mod tests {
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert!(parse_size("2x").is_err());
         assert!(parse_size("lots").is_err());
+    }
+
+    #[test]
+    fn sizes_print_in_the_largest_unit_that_keeps_one() {
+        assert_eq!(format_size(0), "0.0 B");
+        assert_eq!(format_size(3 << 19), "1.5 MiB");
+        assert_eq!(format_size(16 << 30), "16.0 GiB");
+        assert_eq!(format_size(2 << 40), "2048.0 GiB");
     }
 }

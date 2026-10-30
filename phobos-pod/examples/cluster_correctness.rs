@@ -5,22 +5,13 @@ use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
+use phobos_base::cli::format_size;
 use phobos_cluster::isa::Region;
 use phobos_cluster::storage;
 use phobos_sched::server::DispatchConfig;
 use phobos_sched::{IngestPolicy, default_supers, plan_budgeted_with};
 
 use common::{matmul_dims, matmul_job, matmul_src, start_cluster, temp_uris};
-
-fn fmt_bytes(b: u64) -> String {
-    const U: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let (mut v, mut u) = (b as f64, 0);
-    while v >= 1024.0 && u < U.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", U[u])
-}
 
 /// Write `n` f32 in [-1, 1] to a fresh file:// tensor, one chunk in RAM at a
 /// time. Returns the wall time.
@@ -148,16 +139,16 @@ async fn main() -> Result<()> {
     let aggregate = arena as u64 * nodes as u64;
     println!(
         "on disk: {} of f32 (A+B+C)\nplan: {} instrs, peak resident {}/node -> arena {}/node",
-        fmt_bytes(footprint),
+        format_size(footprint),
         pl.total_instrs(),
-        fmt_bytes(peak),
-        fmt_bytes(arena as u64),
+        format_size(peak),
+        format_size(arena as u64),
     );
     println!(
         "the shared GPU must hold {} x {} = {} at once (operands replicate per node)",
         nodes,
-        fmt_bytes(arena as u64),
-        fmt_bytes(aggregate),
+        format_size(arena as u64),
+        format_size(aggregate),
     );
 
     // Seed the inputs, the slow part, and pre-size the output.
