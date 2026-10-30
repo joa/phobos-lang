@@ -290,16 +290,15 @@ fn intrinsic_names_round_trip() {
         Intrinsic::Gather,
         Intrinsic::ArgSel,
     ];
-    for fmt in RawFmt::ALL {
-        all.extend([
-            Intrinsic::RawQmma(fmt),
-            Intrinsic::RawQmmaStaged(fmt),
-            Intrinsic::RawQgemm(fmt),
-        ]);
-    }
+    all.push(Intrinsic::RawQmma(RawFmt::Iq1s));
+    all.extend(RawFmt::ALL.into_iter().filter(|f| f.has_qmma_staged()).map(Intrinsic::RawQmmaStaged));
+    all.extend(RawFmt::ALL.into_iter().filter(|f| f.has_qgemm()).map(Intrinsic::RawQgemm));
     for i in all {
         assert_eq!(Intrinsic::from_name(&i.name()), Some(i), "{}", i.name());
     }
+    assert_eq!(Intrinsic::from_name("q2k_qgemm_t"), None);
+    assert_eq!(Intrinsic::from_name("q4k_qmma_staged_t"), None);
+    assert_eq!(Intrinsic::from_name("q4k_qmma_t"), None);
     assert_eq!(Intrinsic::from_name("wobble"), None);
     assert_eq!(Intrinsic::from_name("iq2xxs_qdot_t"), None);
     assert_eq!(Intrinsic::from_name("q9k_qdot_t"), None);

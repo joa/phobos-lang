@@ -1,6 +1,6 @@
-// The IQ formats' and PTQ1_0's decode matvecs written with lanes:
-// `<fmt>_qdot_i8_t`'s mapping in `.ph`, four lanes a column, each a quarter
-// of every block, the weight grouped by eight columns as the device holds it.
+// The IQ formats' and PTQ1_0's decode matvecs written with lanes, four
+// lanes a column, each a quarter of every block, the weight grouped by
+// eight columns as the device holds it.
 // A format's grid is staged into a shared tile once per CTA, which the lanes
 // then read.
 //

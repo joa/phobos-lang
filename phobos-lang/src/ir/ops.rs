@@ -173,6 +173,21 @@ impl RawFmt {
     pub fn from_name(name: &str) -> Option<RawFmt> {
         RawFmt::ALL.into_iter().find(|f| f.name() == name)
     }
+
+    /// Whether `<fmt>_qgemm_t` exists: every format but the row-major
+    /// `iq4xs`, `q2k` and `q3k`, which have no built-in.
+    pub fn has_qgemm(self) -> bool {
+        !matches!(self, RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k)
+    }
+
+    /// Whether `<fmt>_qmma_staged_t` exists: IQ1_S and the IQ2 and IQ3
+    /// families.
+    pub fn has_qmma_staged(self) -> bool {
+        matches!(
+            self,
+            RawFmt::Iq1s | RawFmt::Iq2xxs | RawFmt::Iq2xs | RawFmt::Iq2s | RawFmt::Iq3xxs | RawFmt::Iq3s
+        )
+    }
 }
 
 /// A whole-tile operation with one tile in and one out.
@@ -277,7 +292,7 @@ pub enum Intrinsic {
     /// `q8_qgemm_t`: the staged tensor-core GEMM of the raw formats against
     /// a Q8_0 weight held as planes.
     Q8gemmT,
-    /// `<fmt>_qmma_t`: a raw format's batched projection.
+    /// `<fmt>_qmma_t`: a raw format's batched projection; IQ1_S's only.
     RawQmma(RawFmt),
     /// `<fmt>_qmma_staged_t`: the same with the decoded weight staged.
     RawQmmaStaged(RawFmt),
@@ -319,9 +334,9 @@ impl Intrinsic {
         let (fmt, suffix) = callee.split_once('_')?;
         let fmt = RawFmt::from_name(fmt)?;
         Some(match suffix {
-            "qmma_t" => Intrinsic::RawQmma(fmt),
-            "qmma_staged_t" => Intrinsic::RawQmmaStaged(fmt),
-            "qgemm_t" => Intrinsic::RawQgemm(fmt),
+            "qmma_t" if fmt == RawFmt::Iq1s => Intrinsic::RawQmma(fmt),
+            "qmma_staged_t" if fmt.has_qmma_staged() => Intrinsic::RawQmmaStaged(fmt),
+            "qgemm_t" if fmt.has_qgemm() => Intrinsic::RawQgemm(fmt),
             _ => return None,
         })
     }

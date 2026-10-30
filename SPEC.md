@@ -383,7 +383,7 @@ Tables are `[1, n]` `i8` tensors, built on the host by `phobos-gguf`'s `quant` m
 | `<fmt>` | `qmma_staged_t` | `qgemm_t` |
 |---|---|---|
 | `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid2` |
-| `iq1m` | `grid` = `iq1s_packed_grid` | as `iq1s` |
+| `iq1m` | | as `iq1s` |
 | `iq2xxs` | `grid, signs` = `iq2xxs_packed_grid`, `iq2xxs_packed_signs` | `grid, masks` = `iq2xxs_packed_grid`, `iq2xxs_sign_masks` |
 | `iq2xs` | `iq2xs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
 | `iq2s` | `iq2s_packed_grid`, `iq2s_packed_signs` | `iq2s_packed_grid`, `iq2s_sign_masks` |

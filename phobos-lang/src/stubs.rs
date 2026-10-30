@@ -50,8 +50,9 @@ class _Ctx:
 ctx: _Ctx
 
 
-def kernel(fn: Any = None, *, key: Sequence[str] | None = None) -> Any:
-    """A Phobos kernel, launched as `kernel[grid](*args)`."""
+def kernel(fn: Any = None, *, key: Sequence[str] | None = None, reference: Callable[..., Any] | None = None) -> Any:
+    """A Phobos kernel, launched as `kernel[grid](*args)`; `key` and
+    `reference` are the autotuner's, see `phobos.autotune`."""
 
 
 def fn(f: Any = None, *, uses: Sequence[str] = ()) -> Any:

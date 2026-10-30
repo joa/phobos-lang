@@ -58,6 +58,17 @@ const FORMATS: [(&str, &[usize]); 12] = [
     ("ptq1", &[]),
 ];
 
+#[test]
+fn the_formats_with_a_qgemm_are_the_ones_the_emitter_decodes() {
+    use crate::codegen::tile::QgFormat;
+    use crate::ir::RawFmt;
+    for fmt in RawFmt::ALL {
+        let name = format!("{}_qgemm_t", fmt.name());
+        assert_eq!(fmt.has_qgemm(), QgFormat::from_intrinsic(&name).is_some(), "{name}");
+        assert_eq!(fmt.has_qgemm(), FORMATS.iter().any(|(f, _)| *f == fmt.name()), "{name}");
+    }
+}
+
 /// Whether the format's runs subtract a minimum, which stages two more
 /// planes.
 fn has_min(fmt: &str) -> bool {
