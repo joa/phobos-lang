@@ -139,7 +139,9 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
         let name = entry.file_name().to_string_lossy().into_owned();
 
         if path.is_dir() {
-            if name != "target" && !name.starts_with('.') {
+            // Only the build's own `target`: phobos-lang has a source
+            // directory by that name.
+            if path != ROOT.join("target") && name != "node_modules" && !name.starts_with('.') {
                 walk(&path, found);
             }
         } else if path.extension().is_some_and(|e| e == "rs") {
