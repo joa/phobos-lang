@@ -259,58 +259,24 @@ impl Promote {
         let mut written = BTreeSet::new();
         written_in(ir, old, &self.tiles, &mut written);
         let carried: Vec<ValueId> = written.into_iter().filter(|t| self.env.contains_key(t)).collect();
-        let body = ir.blocks_of(old)[0];
+        let outer = self.env.clone();
         if carried.is_empty() {
-            let outer = self.env.clone();
-            self.block(ir, body);
+            self.block(ir, ir.blocks_of(old)[0]);
             self.env = outer;
             return;
         }
 
-        let first = info.bound_operands();
-        let operands = ir.operands(old).to_vec();
-        let mut new_operands = operands[..first + info.carried].to_vec();
-        new_operands.extend(carried.iter().map(|t| self.env[t]));
-        new_operands.extend_from_slice(&operands[first + info.carried..]);
-
-        let mut arg_types: Vec<Type> = ir.args(body).iter().map(|&a| ir.ty(a).clone()).collect();
-        arg_types.extend(carried.iter().map(|_| self.ty.clone()));
-        let block = ir.new_block(&arg_types);
-        let (old_args, new_args) = (ir.args(body).to_vec(), ir.args(block).to_vec());
-        for (&from, &to) in old_args.iter().zip(&new_args) {
-            if let Some(name) = ir.name(from).map(str::to_owned) {
-                ir.set_name(to, name);
+        let bounds = ir.operands(old)[..info.bound_operands()].to_vec();
+        let inits: Vec<ValueId> = carried.iter().map(|t| self.env[t]).collect();
+        let types = vec![self.ty.clone(); carried.len()];
+        let kind = ForInfo { carried: info.carried + carried.len(), ..info };
+        let new = ir.add_carried(old, kind, &bounds, &inits, &types, |ir, block, args| {
+            for (&t, &arg) in carried.iter().zip(args) {
+                self.env.insert(t, arg);
             }
-            ir.replace_all_uses(from, to);
-        }
-        let mut finals = Vec::new();
-        for op in ir.ops(body).to_vec() {
-            if ir.kind(op).is_terminator() {
-                finals = ir.operands(op).to_vec();
-                ir.erase_op(op);
-            } else {
-                ir.move_op(op, At::End(block));
-            }
-        }
-
-        let outer = self.env.clone();
-        for (&t, &arg) in carried.iter().zip(&new_args[old_args.len()..]) {
-            self.env.insert(t, arg);
-        }
-        self.block(ir, block);
-        finals.extend(carried.iter().map(|t| self.env[t]));
-        let span = ir.set_span(ir.span(old));
-        ir.create_op(At::End(block), OpKind::Yield, &finals, Vec::new(), Vec::new());
-
-        let mut types: Vec<Type> = ir.results(old).iter().map(|&r| ir.ty(r).clone()).collect();
-        types.extend(carried.iter().map(|_| self.ty.clone()));
-        let kind = OpKind::For(ForInfo { carried: info.carried + carried.len(), ..info });
-        let new = ir.create_op(At::Before(old), kind, &new_operands, types, vec![block]);
-        ir.set_span(span);
-        for (&from, &to) in ir.results(old).to_vec().iter().zip(&ir.results(new).to_vec()) {
-            ir.replace_all_uses(from, to);
-        }
-        ir.erase_op(old);
+            self.block(ir, block);
+            carried.iter().map(|t| self.env[t]).collect()
+        });
 
         self.env = outer;
         let results = ir.results(new).to_vec();

@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use super::{Binding, Build, Rv};
 use crate::ast::{Expr, ExprKind, Span, Stmt, Sub, Type as AstType};
 use crate::ast::BinOp;
-use crate::ir::{Bounds, ForInfo, IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
+use crate::ir::{IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
 
 /// Why a loop body was not turned into a pipelined loop.
 pub(crate) enum PipelineDecline {
@@ -215,12 +215,12 @@ impl Build {
     }
 
     /// The pipelined loop, threading the register tiles named in `carried`
-    /// through it as carried values, as [`Self::emit_regs_for`] does.
+    /// through it as carried values.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_pipelined_loop(
         &mut self,
         var: &str,
-        [lo, hi, st]: [ValueId; 3],
+        bounds: [ValueId; 3],
         iv_div: i64,
         staged: &[(&str, &Expr, Span)],
         rest: &[Stmt],
@@ -228,26 +228,7 @@ impl Build {
         carried: &[String],
         hoisted: &[ValueId],
     ) -> Result<()> {
-        let mut inits = Vec::with_capacity(carried.len());
-        for name in carried {
-            let Some(Binding::Regs(v)) = self.lookup(name) else {
-                bail!("`{name}` is not register-bound");
-            };
-            inits.push(v);
-        }
-        let types: Vec<Type> = inits.iter().map(|&v| self.ir.ty(v).clone()).collect();
-        let mut arg_types = vec![Type::INDEX];
-        arg_types.extend(types.iter().cloned());
-        let block = self.ir.new_block(&arg_types);
-        let iv = self.ir.args(block)[0];
-        self.ir.set_name(iv, var);
-        let args: Vec<ValueId> = self.ir.args(block)[1..].to_vec();
-        self.in_block(block, |b| {
-            b.push_scope();
-            b.bind(var, Binding::Let { value: iv, div: iv_div });
-            for (name, &arg) in carried.iter().zip(&args) {
-                b.bind(name, Binding::Regs(arg));
-            }
+        self.emit_carried_for(var, bounds, iv_div, carried, hoisted, Some(info), |b| {
             let mut bindings: Vec<(&str, Binding)> = Vec::new();
             // Each stage stands for its own statement, as in a staging run.
             for &(name, expr, span) in staged {
@@ -262,40 +243,8 @@ impl Build {
                 })?;
                 bindings.push((name, Binding::View(buf)));
             }
-            let built = b.emit_scope(&bindings, rest);
-            let mut finals = Vec::with_capacity(carried.len());
-            for name in carried {
-                match b.lookup(name) {
-                    Some(Binding::Regs(v)) => finals.push(v),
-                    _ => bail!("`{name}` lost its register binding in the loop body"),
-                }
-            }
-            b.pop_scope();
-            built?;
-            b.stmt(OpKind::Yield, &finals);
-            Ok::<(), anyhow::Error>(())
-        })?;
-        let mut operands = vec![lo, hi, st];
-        operands.extend_from_slice(&inits);
-        operands.extend_from_slice(hoisted);
-        let op = self.op(
-            OpKind::For(ForInfo {
-                bounds: Bounds::Dynamic,
-                ragged: false,
-                carried: inits.len(),
-                hoisted: hoisted.len(),
-                pipeline: Some(info),
-                unroll: 1,
-            }),
-            &operands,
-            types,
-            vec![block],
-        );
-        let results = self.ir.results(op).to_vec();
-        for (name, result) in carried.iter().zip(results) {
-            self.update_binding(name, Binding::Regs(result));
-        }
-        Ok(())
+            b.emit_scope(&bindings, rest)
+        })
     }
 
     /// Whether the last statement lowers to a tile op, which always ends

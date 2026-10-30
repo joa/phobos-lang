@@ -198,59 +198,26 @@ impl Carry<'_> {
                 None => ([operands[0], operands[1], operands[2]], None),
             },
         };
-        let first = info.bound_operands();
-        let carried = &operands[first..first + info.carried];
-        let hoisted = &operands[first + info.carried..];
-
-        let body = ir.blocks_of(old)[0];
-        let mut arg_types: Vec<Type> = ir.args(body).iter().map(|&a| ir.ty(a).clone()).collect();
-        arg_types.push(self.ty.clone());
-        let block = ir.new_block(&arg_types);
-        for (&from, &to) in ir.args(body).to_vec().iter().zip(&ir.args(block).to_vec()) {
-            if let Some(name) = ir.name(from).map(str::to_owned) {
-                ir.set_name(to, name);
-            }
-            ir.replace_all_uses(from, to);
-        }
-        let mut finals = Vec::new();
-        for op in ir.ops(body).to_vec() {
-            if ir.kind(op).is_terminator() {
-                finals = ir.operands(op).to_vec();
-                ir.erase_op(op);
-            } else {
-                ir.move_op(op, At::End(block));
-            }
-        }
-        let pipeline = match info.pipeline {
-            Some(p) if !ir.kernel.extended_pipelining() => {
-                as_staging_run(ir, block, p.staged);
-                None
-            }
-            p => p,
-        };
-        let inner = *ir.args(block).last().expect("the carried value's argument");
-        finals.push(self.thread(ir, block, inner));
-        self.op(ir, old, At::End(block), OpKind::Yield, &finals, Vec::new(), Vec::new());
-
-        let mut types: Vec<Type> = ir.results(old).iter().map(|&r| ir.ty(r).clone()).collect();
-        types.push(self.ty.clone());
-        let mut new_operands = bounds.to_vec();
-        new_operands.extend_from_slice(carried);
-        new_operands.push(acc);
-        new_operands.extend_from_slice(hoisted);
-        let kind = OpKind::For(ForInfo {
+        let pipeline = info.pipeline.filter(|_| ir.kernel.extended_pipelining());
+        let kind = ForInfo {
             bounds: Bounds::Dynamic,
             ragged: false,
             carried: info.carried + 1,
             hoisted: info.hoisted,
             pipeline,
             unroll: info.unroll,
+        };
+        let types = [self.ty.clone()];
+        let new = ir.add_carried(old, kind, &bounds, &[acc], &types, |ir, block, args| {
+            if let (Some(p), None) = (info.pipeline, pipeline) {
+                as_staging_run(ir, block, p.staged);
+            }
+            vec![self.thread(ir, block, args[0])]
         });
-        let new = self.op(ir, old, at, kind, &new_operands, types, vec![block]);
-        for (&from, &to) in ir.results(old).to_vec().iter().zip(&ir.results(new).to_vec()) {
-            ir.replace_all_uses(from, to);
+        if let Some(&span) = self.spans.get(&old) {
+            let yielded = *ir.ops(ir.blocks_of(new)[0]).last().expect("a loop body ends in its yield");
+            self.spans.extend([(yielded, span), (new, span)]);
         }
-        ir.erase_op(old);
         let cond = replay.map(|next| {
             let cond = ir.operand(next, 0);
             ir.erase_op(next);

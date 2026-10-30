@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
 use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt};
-use crate::ir::{Bounds, DistType, ForInfo, OpKind, Reduce, RegLayout, Scalar, Tree, Type, ValueId};
+use crate::ir::{Bounds, DistType, ForInfo, OpKind, Pipeline, Reduce, RegLayout, Scalar, Tree, Type, ValueId};
 
 /// Elements one thread may hold of one register tile.
 const MAX_REGS_PER_THREAD: i64 = 64;
@@ -168,28 +168,44 @@ impl Build {
         hoisted: &[ValueId],
     ) -> Result<()> {
         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
-        let mut inits = Vec::new();
-        for name in names {
+        self.emit_carried_for(var, [lo, hi, st], iv_div, names, hoisted, None, |b| b.emit_stmts(body))
+    }
+
+    /// A loop over `[lo, hi, st]` threading the register tiles named in
+    /// `carried` through it as carried values. `body` builds the loop's
+    /// body, with `var` and each of them bound; with `pipeline`, the loop is
+    /// the pipelined one it describes.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_carried_for(
+        &mut self,
+        var: &str,
+        [lo, hi, st]: [ValueId; 3],
+        iv_div: i64,
+        carried: &[String],
+        hoisted: &[ValueId],
+        pipeline: Option<Pipeline>,
+        body: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        let mut inits = Vec::with_capacity(carried.len());
+        for name in carried {
             let Some(Binding::Regs(r)) = self.lookup(name) else {
                 bail!("`{name}` is not register-bound");
             };
             inits.push(r);
         }
         let types: Vec<Type> = inits.iter().map(|&v| self.ir.ty(v).clone()).collect();
-        let mut arg_types = vec![Type::INDEX];
-        arg_types.extend(types.iter().cloned());
-        let block = self.ir.new_block(&arg_types);
+        let block = self.ir.new_block(&[&[Type::INDEX][..], &types].concat());
         let iv = self.ir.args(block)[0];
         self.ir.set_name(iv, var);
         let args: Vec<ValueId> = self.ir.args(block)[1..].to_vec();
         self.in_block(block, |b| {
             b.push_scope();
             b.bind(var, Binding::Let { value: iv, div: iv_div });
-            for (name, &arg) in names.iter().zip(&args) {
+            for (name, &arg) in carried.iter().zip(&args) {
                 b.bind(name, Binding::Regs(arg));
             }
-            let finals = b.emit_stmts(body).and_then(|()| {
-                names
+            let finals = body(b).and_then(|()| {
+                carried
                     .iter()
                     .map(|name| match b.lookup(name) {
                         Some(Binding::Regs(r)) => Ok(r),
@@ -201,24 +217,18 @@ impl Build {
             b.stmt(OpKind::Yield, &finals?);
             Ok::<(), anyhow::Error>(())
         })?;
-        let mut operands = vec![lo, hi, st];
-        operands.extend_from_slice(&inits);
-        operands.extend_from_slice(hoisted);
-        let op = self.op(
-            OpKind::For(ForInfo {
-                bounds: Bounds::Dynamic,
-                ragged: false,
-                carried: inits.len(),
-                hoisted: hoisted.len(),
-                pipeline: None,
-                unroll: 1,
-            }),
-            &operands,
-            types,
-            vec![block],
-        );
+        let info = ForInfo {
+            bounds: Bounds::Dynamic,
+            ragged: false,
+            carried: inits.len(),
+            hoisted: hoisted.len(),
+            pipeline,
+            unroll: 1,
+        };
+        let operands = [&[lo, hi, st][..], &inits, hoisted].concat();
+        let op = self.op(OpKind::For(info), &operands, types, vec![block]);
         let results = self.ir.results(op).to_vec();
-        for (name, result) in names.iter().zip(results) {
+        for (name, result) in carried.iter().zip(results) {
             self.update_binding(name, Binding::Regs(result));
         }
         Ok(())
