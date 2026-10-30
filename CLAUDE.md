@@ -17,7 +17,8 @@ environment variable the tree reads is documented in `ENV.md`, with the
 tree's two toggle spellings (`phobos_base::env::flag` opt-in, `flag_on`
 opt-out, `flag_set` opt-out with unset told apart); a new one is added
 there in the same change, and a toggle is read through one of those
-helpers rather than a spelling of its own.
+helpers rather than a spelling of its own; `phobos-base/tests/env_doc.rs`
+holds the tree to both.
 
 ## Rust
 - Write elegant, idiomatic and clippy-clean rust code

@@ -5,10 +5,9 @@
 // Lengths are physical lines, as `wc -l` counts them. Generated code lands in
 // OUT_DIR under `target/`, which the walk skips.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+mod common;
+
+use common::{ROOT, read, relative};
 
 /// Longest a source file may be.
 const MAX_FILE_LINES: usize = 900;
@@ -31,7 +30,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
 fn no_source_file_is_longer_than_the_cap() {
     let mut over = Vec::new();
 
-    for file in sources() {
+    for file in common::files(&["rs"]) {
         let name = relative(&file);
         let lines = read(&file).lines().count();
 
@@ -54,7 +53,7 @@ fn no_source_file_is_longer_than_the_cap() {
 fn no_inline_test_module_is_longer_than_the_cap() {
     let mut over = Vec::new();
 
-    for file in sources() {
+    for file in common::files(&["rs"]) {
         for (start_line, lines) in inline_test_modules(&read(&file)) {
             if lines > MAX_INLINE_TEST_LINES {
                 let name = relative(&file);
@@ -94,61 +93,6 @@ fn the_grandfathered_list_holds_nothing_stale() {
     assert!(stale.is_empty(), "\n{}\n", stale.join("\n"));
 }
 
-/// The first directory at or above this crate whose manifest declares the
-/// workspace.
-static ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
-    let mut dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        let manifest = dir.join("Cargo.toml");
-        if manifest.exists() && read(&manifest).contains("[workspace]") {
-            return dir.to_path_buf();
-        }
-        dir = dir
-            .parent()
-            .expect("no [workspace] manifest above this crate");
-    }
-});
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// Workspace-relative, with forward slashes, so the list above reads the same
-/// on every platform.
-fn relative(path: &Path) -> String {
-    path.strip_prefix(ROOT.as_path())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// Every `.rs` file in the workspace, skipping build output and anything
-/// hidden.
-fn sources() -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    walk(&ROOT, &mut found);
-    found.sort();
-    found
-}
-
-fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        if path.is_dir() {
-            // Only the build's own `target`: phobos-lang has a source
-            // directory by that name.
-            if path != ROOT.join("target") && name != "node_modules" && !name.starts_with('.') {
-                walk(&path, found);
-            }
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            found.push(path);
-        }
-    }
-}
 
 /// The (first line, length in lines) of every inline `mod tests { .. }`.
 ///
