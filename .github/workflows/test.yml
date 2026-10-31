@@ -98,7 +98,7 @@ jobs:
           # libclang; the toolchain is built without clang, so take Ubuntu's.
           sudo apt-get install -y -q libclang-18-dev
           echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
-          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy
           rustup default "$RUST_VERSION"
 
       - uses: Swatinem/rust-cache@v2
