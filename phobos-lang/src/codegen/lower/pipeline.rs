@@ -6,7 +6,7 @@ use melior::{
     ir::{Block, BlockLike, Region, RegionLike, Type, Value, ValueLike, operation::OperationBuilder},
 };
 
-use super::Lowered;
+use super::{Lowered, layout};
 use crate::codegen::{Codegen, MemVal, detach};
 use crate::shape::DYN;
 use crate::ir::{Ir, OpId, OpKind, Pipeline, ValueId};
@@ -45,19 +45,19 @@ impl<'c> Codegen<'c> {
 
         // Prologue: stage iteration 0 into each pair's first buffer.
         let mut bufs0 = Vec::with_capacity(info.staged);
-        let mut pads = Vec::with_capacity(info.staged);
+        let mut layouts = Vec::with_capacity(info.staged);
         let mut srcs = Vec::with_capacity(info.staged);
         self.lowered.push(HashMap::new());
         self.set_ir(iv, Lowered::Scalar(lo));
         let prologue = (|| {
             for &o in prefix {
-                if let OpKind::Stage(stage) = ir.kind(o) {
+                if matches!(ir.kind(o), OpKind::Stage(_)) {
                     let src = self.tile_ir(ir, ir.operand(o, 0))?;
-                    let swizzled = matches!(ir.ty(ir.result(o)), crate::ir::Type::Tile(t) if t.layout.swizzle.is_some());
-                    let b0 = self.alloc_stage_buf(block, &src, stage.pad, swizzled)?;
+                    let layout = layout(ir, ir.result(o));
+                    let b0 = self.alloc_tile_as(block, src.elem, &src.shape, &layout)?;
                     self.tile_copy(block, &src, &b0, true, false)?;
                     bufs0.push(b0);
-                    pads.push((stage.pad, swizzled));
+                    layouts.push(layout);
                     srcs.push(src);
                 } else {
                     self.emit_op(block, ir, o)?;
@@ -85,8 +85,8 @@ impl<'c> Codegen<'c> {
         if single {
             bufs1.clone_from(&bufs0);
         } else {
-            for (src, &pad) in srcs.iter().zip(&pads) {
-                bufs1.push(self.alloc_stage_buf(block, src, pad.0, pad.1)?);
+            for (src, layout) in srcs.iter().zip(&layouts) {
+                bufs1.push(self.alloc_tile_as(block, src.elem, &src.shape, layout)?);
             }
         }
 
@@ -131,7 +131,13 @@ impl<'c> Codegen<'c> {
         let (out, step) = if single {
             (after_a, st)
         } else {
-            let out = self.emit_pipeline_half_b(&body_block, &half, next, st, &bufs0, &bufs1, &after_a, &types)?;
+            // Half B, when iteration iv+st exists: compute it from bufs1,
+            // prefetch iv+2*st into bufs0. Otherwise the carried values pass
+            // through.
+            let out = self.guarded_iteration(&body_block, next, hi, &after_a, |cg, half_b, after_a| {
+                let next2 = cg.addi(half_b, next, st)?;
+                cg.emit_pipeline_stage_ir(half_b, &half, next, next2, &bufs1, &bufs0, after_a)
+            })?;
             let two = self.const_index(block, 2)?;
             (out, self.muli(block, st, two)?)
         };
@@ -140,9 +146,6 @@ impl<'c> Codegen<'c> {
         let region = Region::new();
         region.append_block(body_block);
         let mut operands = vec![lo, hi, step];
-        // prefetch iv+2*st into bufs0. Otherwise the carried values pass
-        // through.
-
         operands.extend_from_slice(&inits);
         let loop_op = block.append_operation(
             OperationBuilder::new("scf.for", self.loc)
@@ -232,39 +235,6 @@ impl<'c> Codegen<'c> {
 }
 
 impl<'c> Codegen<'c> {
-    /// Half B, when iteration `next` exists: compute it from `bufs1`,
-    /// prefetch the one after into `bufs0`. Otherwise the carried values
-    /// `after_a` pass through. Returns the carried values after the turn.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_pipeline_half_b(
-        &mut self,
-        body: &Block<'c>,
-        half: &Half<'c, '_>,
-        next: Value<'c, 'c>,
-        st: Value<'c, 'c>,
-        bufs0: &[MemVal<'c>],
-        bufs1: &[MemVal<'c>],
-        after_a: &[Value<'c, 'c>],
-        types: &[Type<'c>],
-    ) -> Result<Vec<Value<'c, 'c>>> {
-        let have_b = self.push(
-            body,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, half.hi, self.loc),
-        )?;
-        let half_b = Block::new(&[]);
-        let next2 = self.addi(&half_b, next, st)?;
-        let after_b = self.emit_pipeline_stage_ir(&half_b, half, next, next2, bufs1, bufs0, after_a)?;
-        half_b.append_operation(scf::r#yield(&after_b, self.loc));
-        let half_b_region = Region::new();
-        half_b_region.append_block(half_b);
-        let skip_b = Block::new(&[]);
-        skip_b.append_operation(scf::r#yield(after_a, self.loc));
-        let skip_b_region = Region::new();
-        skip_b_region.append_block(skip_b);
-        let if_b = body.append_operation(scf::r#if(have_b, types, half_b_region, skip_b_region, self.loc));
-        (0..types.len()).map(|i| Ok(detach(if_b.result(i)?.into()))).collect()
-    }
-
     /// A half's compute: iteration `compute_iv` from the buffers `cur`, with
     /// the carried values `carried`, returning the ones it yields.
     fn emit_pipeline_compute_ir(
@@ -401,17 +371,6 @@ impl<'c> Codegen<'c> {
             self.barrier(block)?;
         }
         Ok(out)
-    }
-
-    /// A buffer for a stage of `src`, padded when the stage asks.
-    fn alloc_stage_buf(&mut self, block: &Block<'c>, src: &MemVal<'c>, pad: bool, swizzled: bool) -> Result<MemVal<'c>> {
-        if pad {
-            self.alloc_tile_padded(block, src.elem, &src.shape)
-        } else if swizzled {
-            self.alloc_tile_swizzled(block, src.elem, &src.shape)
-        } else {
-            self.alloc_tile_shaped(block, src.elem, &src.shape)
-        }
     }
 
     /// How a thread copies its share of `src` into `dst` through registers,

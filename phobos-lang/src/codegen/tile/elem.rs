@@ -173,12 +173,7 @@ impl<'c> Codegen<'c> {
                 dst.elem
             );
         }
-
-        self.distribute(block, dst, 1, true, |cg, blk, idx| {
-            let v = cg.load_as(blk, src.mem, idx, dst.elem)?;
-            blk.append_operation(memref::store(v, dst.mem, idx, cg.loc));
-            Ok(())
-        })
+        self.elem_chain_sweep(block, src, dst, &[])
     }
 
     /// dst[k, m] = src[m, k]: stages a tile k-major so a row of dst holds one

@@ -55,9 +55,10 @@ def main():
     ap.add_argument("--work")
     args = ap.parse_args()
     work = Path(args.work or tempfile.mkdtemp(prefix="phobos-roundtrip-"))
-    if work.exists():
-        shutil.rmtree(work)
     original, python, spelled, emitted_a, emitted_b = (work / d for d in ("ph", "py", "spelled", "emit_ph", "emit_spelled"))
+    # Only what this script writes is cleared, never `--work` itself.
+    for d in (original, python, spelled, emitted_a, emitted_b):
+        shutil.rmtree(d, ignore_errors=True)
     for d in (original, python, spelled):
         d.mkdir(parents=True)
 

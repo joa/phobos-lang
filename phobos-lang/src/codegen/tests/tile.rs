@@ -54,7 +54,7 @@ fn a_tile_read_after_a_loop_keeps_its_buffer() {
     // The last mention ends a name's life, and a nested body counts as part
     // of its statement. `keep` is read inside the loop and after it, so
     // neither the loop body nor the loop may release it.
-    let mlir = emit_mlir(
+    emit_mlir(
         "@launch(256)
         kernel later(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
             var keep: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
@@ -65,7 +65,6 @@ fn a_tile_read_after_a_loop_keeps_its_buffer() {
             O[0 :+ 16, 0 :+ 64] = acc + keep
         }",
     );
-    assert!(module_verifies(&mlir), "{mlir}");
 }
 
 /// A tile is shared memory, so a slice of one keeps that address space. The

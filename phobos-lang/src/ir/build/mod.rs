@@ -39,6 +39,7 @@ pub(crate) use super::at_op::locate;
 pub(crate) use decl::Decl;
 pub(crate) use params::GRID_BARRIER_NAME;
 pub(crate) use crate::shape::DYN;
+use crate::shape::{alloc_align_div, fmt_shape, gcd};
 
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
@@ -124,10 +125,6 @@ pub(crate) struct Build {
     scopes: Vec<HashMap<String, Binding>>,
     pub(crate) shape_env: BTreeMap<String, i64>,
     pub(crate) report: Report,
-    /// Per-dimension divisors of a slice's extents, carried from `@aligned`
-    /// through `Full` subscripts. Only the prescans read it, so it lives
-    /// here rather than on the type.
-    view_divs: HashMap<ValueId, Vec<i64>>,
     /// Loop-invariant dot operands staged in an enclosing loop's preheader,
     /// one frame per open loop: `(source view, staged buffer)`.
     pub(crate) hoisted: Vec<Vec<(ValueId, ValueId)>>,
@@ -214,24 +211,23 @@ pub fn build_cautious(
     cautious: bool,
 ) -> Result<(Ir, Report)> {
     let empty = Ir::new(KernelInfo::default(), &[]);
-    let attr_span = |name: &str| kernel.attr(name).map_or(kernel.name_span, |a| a.span);
     let shape_env = kernel.shape_env(&base.shape_overrides);
     let launch = kernel
         .launch_in(&shape_env)
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("launch")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("launch")))?;
     let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
     let pipeline = kernel
         .pipeline_mode()
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("pipeline")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("pipeline")))?;
     let persistent = kernel
         .persistent()
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("persistent")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("persistent")))?;
     let persistent_blocks = match persistent.clone().flatten() {
         Some(Dim::Int(n)) => Some(n),
         Some(Dim::Sym(name)) => Some(shape_env.get(&name).copied().ok_or_else(|| {
             let e = anyhow!("`@persistent({name})`: `{name}` is not an `@autotune` constant");
-            locate(&kernel.source, &empty, e, attr_span("persistent"))
+            locate(&kernel.source, &empty, e, kernel.attr_span("persistent"))
         })?),
         None => None,
     };
@@ -257,7 +253,6 @@ pub fn build_cautious(
         scopes: Vec::new(),
         shape_env,
         report: Report::default(),
-        view_divs: HashMap::new(),
         hoisted: Vec::new(),
         ragged_iv: None,
         trimmed_ivs: Vec::new(),
@@ -267,7 +262,7 @@ pub fn build_cautious(
         pad_stage: info.pad_stage,
         pipeline: info.pipeline,
         cta_threads,
-        registers: kernel.register_tiles(),
+        registers: kernel.named_by("registers"),
         regs_declared: Vec::new(),
         fusing_regs: false,
         source: kernel.source.clone(),
@@ -583,15 +578,17 @@ impl Build {
         self.is_buffer(v) && self.ir.name(v).is_none()
     }
 
+    /// A known divisor of `v`'s extent `d`: a tensor's promise, or a
+    /// slice's, which carries it through a dimension taken whole.
     pub(crate) fn div_of(&self, v: ValueId, d: usize) -> i64 {
-        match self.ir.ty(v) {
-            Type::Tensor(t) => t.div.get(d).copied().unwrap_or(1),
-            _ => self.view_divs.get(&v).and_then(|ds| ds.get(d)).copied().unwrap_or(1),
-        }
-    }
-
-    pub(crate) fn set_view_divs(&mut self, v: ValueId, divs: Vec<i64>) {
-        self.view_divs.insert(v, divs);
+        let divs = match self.ir.ty(v) {
+            Type::Tensor(t) => &t.div,
+            _ => match self.ir.def_op(v).map(|op| self.ir.kind(op)) {
+                Some(OpKind::Slice(s)) => &s.divs,
+                _ => return 1,
+            },
+        };
+        divs.get(d).copied().unwrap_or(1)
     }
 
     // Types.
@@ -672,19 +669,6 @@ pub(crate) fn extent(d: i64) -> Extent {
     if d == DYN { Extent::Dyn } else { Extent::Fixed(d) }
 }
 
-/// The alignment `alloc_tile_shaped` proves for a fresh buffer: the gcd of
-/// its row-major strides above the innermost.
-pub(crate) fn alloc_align_div(shape: &[i64]) -> i64 {
-    row_major_strides(shape)[..shape.len() - 1]
-        .iter()
-        .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)))
-}
-
-pub(crate) fn gcd(a: i64, b: i64) -> i64 {
-    let (a, b) = (a.abs(), b.abs());
-    if b == 0 { a } else { gcd(b, a % b) }
-}
-
 pub(crate) fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
     if a.len() != b.len() {
         return None;
@@ -716,25 +700,4 @@ pub(crate) fn dim_in_bounds(extent: i64, size: i64, off_div: i64, start: Option<
         return true;
     }
     extent % size == 0 && off_div % size == 0
-}
-
-/// Row-major strides for a shape ([`DYN`] propagates outward).
-pub(crate) fn row_major_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1i64; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        strides[i] = if shape[i + 1] == DYN || strides[i + 1] == DYN {
-            DYN
-        } else {
-            strides[i + 1] * shape[i + 1]
-        };
-    }
-    strides
-}
-
-pub(crate) fn fmt_dim(d: i64) -> String {
-    if d == DYN { "?".to_string() } else { d.to_string() }
-}
-
-pub(crate) fn fmt_shape(shape: &[i64]) -> String {
-    shape.iter().map(|&d| fmt_dim(d)).collect::<Vec<_>>().join("x")
 }

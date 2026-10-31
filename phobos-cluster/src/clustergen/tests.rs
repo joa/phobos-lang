@@ -510,3 +510,12 @@ C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
     let err = compile(&first(src)).unwrap_err().to_string();
     assert!(err.contains("multiple compute statements"), "got: {err}");
 }
+
+#[test]
+fn an_indexed_accumulator_is_still_the_accumulator() {
+    // Indexing the accumulator reads it, so the store is an epilogue, and one
+    // that is not `[alpha *] acc [+ [beta *] c_old]`.
+    let src = MATMUL.replace("= acc\n}", "= acc[0 :+ TILE_M, 0 :+ TILE_N]\n}");
+    let err = compile(&first(&src)).unwrap_err().to_string();
+    assert!(err.contains("accumulator term of a GEMM epilogue"), "got: {err}");
+}

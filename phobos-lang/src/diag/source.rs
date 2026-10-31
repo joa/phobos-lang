@@ -165,8 +165,8 @@ impl SourceFile {
         self.text[start..end].trim_end_matches(['\n', '\r'])
     }
 
-    /// The byte offset of a line and a column from 1, as the lexer counts
-    /// them, clamped to the line.
+    /// The byte offset of a line and a column, both from 1 and counted as
+    /// [`Self::line_col`] counts them, clamped to the line.
     pub fn offset(&self, line: u32, col: u32) -> u32 {
         let line = line.clamp(1, self.line_starts.len() as u32);
         let start = self.line_start(line);

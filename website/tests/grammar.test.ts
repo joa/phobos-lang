@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { type BundledLanguage, createHighlighter } from "shiki"
 import { describe, expect, it } from "vitest"
 
-const lexer = readFileSync(new URL("../../phobos-lang/src/lexer.rs", import.meta.url), "utf8")
+const tokens = readFileSync(new URL("../../phobos-lang/src/token.rs", import.meta.url), "utf8")
 const grammar = readFileSync(new URL("../src/grammars/phobos.tmLanguage.json", import.meta.url), "utf8")
 
 /** Each token's text and its innermost scope, tokenized by shiki as the site's pages are. */
@@ -21,7 +21,7 @@ async function scopes(code: string): Promise<[string, string][]> {
 
 describe("phobos grammar", () => {
   it("knows every keyword the lexer knows", () => {
-    const keywords = [...lexer.matchAll(/"([a-z_]+)" => Tok::[A-Z][A-Za-z]*,/g)].map(match => match[1])
+    const keywords = [...tokens.matchAll(/\("([a-z_]+)", Tok::[A-Z][A-Za-z]*\)/g)].map(match => match[1])
     expect(keywords.length).toBeGreaterThan(10)
     const missing = keywords.filter(keyword => !new RegExp(`[(|]${keyword}[|)]`).test(grammar))
     expect(missing).toEqual([])

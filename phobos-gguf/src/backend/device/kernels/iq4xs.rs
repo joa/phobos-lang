@@ -1,7 +1,8 @@
-// IQ4_XS matvec, decoding straight from the raw block bytes (see q2k.rs).
+// IQ4_XS's weight expansion for a prompt pass, decoding straight from the
+// raw block bytes (see q2k.rs). One row takes `iq4xs_qdot_lanes` instead.
 //
 // Unlike the other IQ formats, quants are not grid-coded. Each nibble
-// indexes a fixed 16-entry codebook ([`crate::quant::iq4xs_flat_codebook`]),
+// indexes a fixed 16-entry codebook ([`crate::quant::iq4_xs::flat_codebook`]),
 // so one `gather` covers a whole 32-element run. The scale is split as in
 // Q4_K: four bits from `scales_l` and two from `scales_h`.
 //
@@ -20,7 +21,7 @@ const SCALES_H_OFF: usize = 2;
 const SCALES_L_OFF: usize = SCALES_H_OFF + 2;
 const QS_OFF: usize = SCALES_L_OFF + 4;
 
-/// [`crate::quant::iq4xs_flat_codebook`]'s length: sixteen nibble values.
+/// [`crate::quant::iq4_xs::flat_codebook`]'s length: sixteen nibble values.
 pub(crate) const IQ4XS_CODEBOOK_LEN: usize = 16;
 
 /// Byte offsets and shifts of run `ib`'s scale bits, low then high, and its
@@ -53,40 +54,8 @@ fn decoded_run(ib: usize) -> (usize, String) {
     )
 }
 
-pub(crate) fn iq4xs_matvec_src(tn: usize) -> String {
-    let mut body = String::new();
-    for ib in 0..RUNS {
-        let (out_off, decode) = decoded_run(ib);
-        let _ = writeln!(
-            body,
-            "{decode}    let a{ib} = A[pm :+ 1, kb * 256 + {out_off} :+ {RUN}]
-    acc += dot_t(a{ib}, decoded{ib})"
-        );
-    }
-
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-kernel iq4xs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                    D: tensor<f16>[N, NB], CODEBOOK: tensor<i32>[1, {IQ4XS_CODEBOOK_LEN}],
-                    C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  let pm = ctx.block.y
-  let codebook = CODEBOOK[0 :+ 1, :]
-  var acc: tile<f32>[1, TN] = 0.0
-  for kb in range(0, NB, 1) {{
-    var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
-    let d = D[pn * TN :+ TN, kb :+ 1]
-{body}  }}
-  C[pm :+ 1, pn * TN :+ TN] = acc
-}}
-"
-    )
-}
-
-
-/// [`iq4xs_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
-/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
+/// The decode stored into a `[K, N]` scratch, so a matmul over many rows
+/// decodes only once. The `transpose` matches `Backend::matmul`'s layout.
 pub(crate) fn iq4xs_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for ib in 0..RUNS {

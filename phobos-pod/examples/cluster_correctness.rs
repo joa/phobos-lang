@@ -1,46 +1,17 @@
+mod common;
+
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
+use phobos_base::cli::format_size;
 use phobos_cluster::isa::Region;
-use phobos_cluster::proto::{self, TensorInput};
 use phobos_cluster::storage;
-use phobos_cluster::tile::{AccessMode, DataType};
-use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
+use phobos_sched::server::DispatchConfig;
 use phobos_sched::{IngestPolicy, default_supers, plan_budgeted_with};
 
-/// Cluster matmul. The `@cluster` lower bounds set the supertile shape, since
-/// `default_supers` picks them. Each output streams its K/SUPER k-steps
-/// instead of holding them all resident.
-fn matmul_src(super_dim: usize) -> String {
-    format!(
-        r#"
-@cluster(TILE_M in [{super_dim}, 65536], TILE_N in [{super_dim}, 65536], TILE_K in [{super_dim}, 65536])
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
-kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{
-    let pm = ctx.block.x
-    let pn = ctx.block.y
-    var acc: tile<f32>[TILE_M, TILE_N] = 0.0
-    for kt in range(0, K, TILE_K) {{
-        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
-        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
-        acc += dot(a, b)
-    }}
-    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
-}}"#
-    )
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const U: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let (mut v, mut u) = (b as f64, 0);
-    while v >= 1024.0 && u < U.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", U[u])
-}
+use common::{matmul_dims, matmul_job, matmul_src, start_cluster, temp_uris};
 
 /// Write `n` f32 in [-1, 1] to a fresh file:// tensor, one chunk in RAM at a
 /// time. Returns the wall time.
@@ -79,16 +50,6 @@ fn alloc_tensor(uri: &str, n: usize) -> Result<()> {
         .open(storage::file_path(uri)?)?;
     f.set_len((n * 4) as u64)?;
     Ok(())
-}
-
-fn tensor(name: &str, n: usize, mode: AccessMode, uri: String) -> TensorInput {
-    TensorInput {
-        name: name.to_string(),
-        data_type: proto::data_type_to_i32(DataType::F32),
-        shape: vec![n as u64, n as u64],
-        mode: proto::am_to_i32(mode),
-        uri,
-    }
 }
 
 /// Recomputes C[r, c] on the CPU in f64, from row r of A and column c of B
@@ -156,13 +117,10 @@ async fn main() -> Result<()> {
     // since operands are loaded and freed one k-step at a time. The engine
     // parks an ALLOC that would overflow until a FREE makes room, so an arena
     // of peak plus headroom is enough.
-    let source = matmul_src(super_dim);
+    let source = matmul_src(super_dim, 65536);
     let program = phobos_cluster::compile(&phobos_lang::parse(&source)?.remove(0))?;
     let supers = default_supers(&program);
-    let dims = [("M", n as i64), ("N", n as i64), ("K", n as i64)]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+    let dims = matmul_dims(n);
     let pl = plan_budgeted_with(
         &program,
         &dims,
@@ -181,22 +139,20 @@ async fn main() -> Result<()> {
     let aggregate = arena as u64 * nodes as u64;
     println!(
         "on disk: {} of f32 (A+B+C)\nplan: {} instrs, peak resident {}/node -> arena {}/node",
-        fmt_bytes(footprint),
+        format_size(footprint),
         pl.total_instrs(),
-        fmt_bytes(peak),
-        fmt_bytes(arena as u64),
+        format_size(peak),
+        format_size(arena as u64),
     );
     println!(
         "the shared GPU must hold {} x {} = {} at once (operands replicate per node)",
         nodes,
-        fmt_bytes(arena as u64),
-        fmt_bytes(aggregate),
+        format_size(arena as u64),
+        format_size(aggregate),
     );
 
     // Seed the inputs, the slow part, and pre-size the output.
-    let dir = std::env::temp_dir().join("phobos_cluster_correctness");
-    std::fs::create_dir_all(&dir)?;
-    let uri = |f: &str| format!("file://{}", dir.join(f).display());
+    let uri = temp_uris("phobos_cluster_correctness")?;
     let (ua, ub, uc) = (uri("A.bin"), uri("B.bin"), uri("C.bin"));
     let ta = seed_tensor(&ua, n * n, 1)?;
     let tb = seed_tensor(&ub, n * n, 2)?;
@@ -204,37 +160,9 @@ async fn main() -> Result<()> {
     println!("seeded A in {ta:.1?}, B in {tb:.1?}");
 
     // Scheduler and in-process pods over localhost gRPC.
-    let sched = Scheduler::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let sched_addr = listener.local_addr()?.to_string();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let server = sched.clone().into_server();
-    tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(server)
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    for id in 0..nodes {
-        let sa = sched_addr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = phobos_pod::serve(id, sa, "127.0.0.1:0".into(), None, arena).await {
-                eprintln!("node {id}: {e:#}");
-            }
-        });
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (sched, _) = start_cluster(nodes, arena).await?;
 
-    let job = make_job(
-        &source,
-        &[("M", n as i64), ("N", n as i64), ("K", n as i64)],
-        vec![
-            tensor("A", n, AccessMode::Read, ua.clone()),
-            tensor("B", n, AccessMode::Read, ub.clone()),
-            tensor("C", n, AccessMode::Write, uc.clone()),
-        ],
-    );
+    let job = matmul_job(&source, n, &uri);
     let cfg = DispatchConfig {
         nodes,
         budget_bytes: Some(budget),

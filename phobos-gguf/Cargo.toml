@@ -1,6 +1,6 @@
 [package]
 name = "phobos-gguf"
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 description = "GGUF front end: parse quantized model files into metadata, tensors, and vocabulary"
 readme.workspace = true
@@ -27,10 +27,6 @@ cuda = ["dep:cust", "phobos-kernels/cuda"]
 
 [[example]]
 name = "argmax_check"
-required-features = ["cuda"]
-
-[[example]]
-name = "attncheck"
 required-features = ["cuda"]
 
 [[example]]

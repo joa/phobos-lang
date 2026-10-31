@@ -256,6 +256,15 @@ fn the_worker_stops_when_the_meter_says_to() {
     );
 }
 
+#[test]
+fn an_address_in_use_is_an_error_before_the_upload() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let result = serve(addr, model(), defaults(), None, Arc::new(Meter::new()));
+    let err = result.expect_err("serving on a bound port should fail");
+    assert!(format!("{err:#}").contains("cannot listen on"), "{err:#}");
+}
+
 /// A tokenizer whose ids are their own bytes, so log lines quote readable
 /// text.
 struct Bytes;

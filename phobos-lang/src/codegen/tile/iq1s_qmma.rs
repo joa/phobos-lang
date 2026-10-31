@@ -1,6 +1,5 @@
-// IQ1_S on the integer tensor cores, with the grid decode folded in. This is
-// the prompt-pass counterpart of `iq1s_qdot.rs`: it contracts straight from
-// the registers the decode lands in.
+// IQ1_S on the integer tensor cores, with the grid decode folded in: it
+// contracts straight from the registers the decode lands in.
 //
 // Two properties of the format make it fit `mma.m8n8k16.s8`. First, a grid
 // byte is -1, 0 or 1 and the delta is 1/8, so `dl * (g + delta)` is

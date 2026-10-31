@@ -15,7 +15,7 @@ mod size;
 
 pub(crate) type PResult<T> = Result<T, Diagnostic>;
 
-pub struct Parser {
+pub(crate) struct Parser {
     toks: Vec<Token>,
     pos: usize,
     /// The source the tokens came from, which every kernel keeps.
@@ -29,7 +29,7 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(toks: Vec<Token>, source: std::sync::Arc<diag::SourceFile>) -> Self {
+    pub(crate) fn new(toks: Vec<Token>, source: std::sync::Arc<diag::SourceFile>) -> Self {
         Parser {
             toks,
             pos: 0,
@@ -149,15 +149,10 @@ impl Parser {
         }
     }
 
-    /// Every kernel in the source, or every error found in it: a statement
-    /// or an item that fails to parse is reported and skipped, and parsing
-    /// goes on after it.
-    pub fn parse_program(&mut self) -> Result<Vec<Kernel>, Vec<Diagnostic>> {
-        self.parse_program_with(&[])
-    }
-
-    /// [`Self::parse_program`] with `prelude`'s functions in scope, under
-    /// the program's own.
+    /// Every kernel in the source, with `prelude`'s functions in scope under
+    /// the program's own, or every error found in it: a statement or an item
+    /// that fails to parse is reported and skipped, and parsing goes on after
+    /// it.
     pub(crate) fn parse_program_with(&mut self, prelude: &[Function]) -> Result<Vec<Kernel>, Vec<Diagnostic>> {
         let (kernels, fns) = self.parse_items()?;
         let mut kernels = kernels;

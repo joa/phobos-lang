@@ -49,8 +49,8 @@ const RAW_SHAPES: [(usize, usize, usize); 11] = [
     (1, 512, 96),
     (1, 1024, 33),
     (2, 256, 32),
-    // m > 1 at a width no format's TN divides: the masked `_dequant`
-    // fallback, where the other m > 1 shapes reach `_qdecode`.
+    // m > 1 at a width no format's TN divides: a grouped format decodes a
+    // padded last strip, a row-major one a masked one.
     (3, 512, 33),
     (5, 1024, 128),
     (6, 2048, 5120),

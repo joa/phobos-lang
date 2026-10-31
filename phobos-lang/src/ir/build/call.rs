@@ -128,7 +128,7 @@ impl Build {
             }
             _ if super::store::staged_qmma_format(callee).is_some() => {
                 let fmt = super::store::staged_qmma_format(callee).expect("matched above");
-                let ops = self.iq2xxs_qmma_operands(callee, args)?;
+                let ops = self.staged_qmma_operands(callee, args)?;
                 let shape = [self.shape(ops[0])[0], self.shape(ops[2])[0]];
                 let ty = self.shared_ty(Scalar::F32, &shape);
                 Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::RawQmmaStaged(fmt)), &ops, ty)))
@@ -422,17 +422,16 @@ impl Build {
     }
 
     /// `(a, a_scales, qb, d, grid, signs)` for the staged IQ2/IQ3 projections.
-    pub(crate) fn iq2xxs_qmma_operands(&mut self, callee: &str, args: &[Expr]) -> Result<[ValueId; 6]> {
-        let _ = callee;
+    pub(crate) fn staged_qmma_operands(&mut self, callee: &str, args: &[Expr]) -> Result<[ValueId; 6]> {
         let [a, asc, qb, d, grid, signs] = args else {
-            bail!("`iq2xxs_qmma_t` expects (a, a_scales, qb, d, grid, signs)");
+            bail!("`{callee}` expects (a, a_scales, qb, d, grid, signs)");
         };
-        let a = self.tile_operand(a, "iq2xxs_qmma_t")?;
-        let asc = self.tile_operand(asc, "iq2xxs_qmma_t")?;
-        let qb = self.tile_operand(qb, "iq2xxs_qmma_t")?;
-        let d = self.tile_operand(d, "iq2xxs_qmma_t")?;
-        let grid = self.tile_operand(grid, "iq2xxs_qmma_t")?;
-        let signs = self.tile_operand(signs, "iq2xxs_qmma_t")?;
+        let a = self.tile_operand(a, callee)?;
+        let asc = self.tile_operand(asc, callee)?;
+        let qb = self.tile_operand(qb, callee)?;
+        let d = self.tile_operand(d, callee)?;
+        let grid = self.tile_operand(grid, callee)?;
+        let signs = self.tile_operand(signs, callee)?;
         Ok([a, asc, qb, d, grid, signs])
     }
 
@@ -531,9 +530,10 @@ impl Build {
         let val = self.emit_scalar(v)?;
         let val = match (elem, self.scalar_of(val)) {
             (Scalar::I32, Scalar::I32) | (Scalar::F32, Scalar::F32) => val,
-            (Scalar::I32, Scalar::Index | Scalar::I8 | Scalar::I64) => {
+            (Scalar::I32, Scalar::Index) => {
                 self.value(OpKind::IndexCast(Scalar::I32), &[val], Type::Scalar(Scalar::I32))
             }
+            (Scalar::I32, Scalar::I8 | Scalar::I64) => self.numeric_cast(val, Scalar::I32),
             (Scalar::F32, t) if t.is_numeric() => self.numeric_cast(val, Scalar::F32),
             (_, t) => bail!("`atomic_add` into {} cannot take a {} value", elem.mlir_name(), t.mlir_name()),
         };
@@ -556,9 +556,8 @@ impl Build {
             let s = self.emit_scalar(e)?;
             operands.push(match self.scalar_of(s) {
                 Scalar::I32 => s,
-                Scalar::Index | Scalar::I8 | Scalar::I64 => {
-                    self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32))
-                }
+                Scalar::Index => self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32)),
+                Scalar::I8 | Scalar::I64 => self.numeric_cast(s, Scalar::I32),
                 t => bail!("`atomic_cas` into i32 cannot take a {} value", t.mlir_name()),
             });
         }

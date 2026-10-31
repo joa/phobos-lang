@@ -1,5 +1,5 @@
-// IQ2_XXS's decode geometry, shared by the contraction (`iq2xxs_qdot.rs`) and
-// the expansion (`qdecode.rs`). Each lane does two table lookups, a magnitude
+// IQ2_XXS's decode geometry, which the staged projection (`qmma_signed.rs`)
+// decodes with. Each lane does two table lookups, a magnitude
 // grid and a sign table. Lane `l == 0` has no `hi` sign byte.
 
 use super::*;

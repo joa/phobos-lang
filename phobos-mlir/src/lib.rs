@@ -33,6 +33,18 @@ fn ensure_global_init() {
     });
 }
 
+/// A context with every dialect registered and loaded, which is what the
+/// emitter builds in and what a printed module parses back in. The context
+/// keeps its own copy of the registry.
+pub fn context() -> Context {
+    let registry = DialectRegistry::new();
+    register_all_dialects(&registry);
+    let context = Context::new();
+    context.append_dialect_registry(&registry);
+    context.load_all_available_dialects();
+    context
+}
+
 /// Generate PTX for a given function body F.
 ///
 /// A thin wrapper over [`gen_code`] for callers that only ever want NVIDIA.
@@ -58,12 +70,7 @@ where
 {
     ensure_global_init();
 
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = context();
     register_all_llvm_translations(&context);
 
     let loc = Location::unknown(&context);

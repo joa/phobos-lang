@@ -1,6 +1,6 @@
 // The target seam: everything the emitter cannot say in a portable dialect.
 //
-// `Isa` is the vocabulary and `nvidia.rs` its one implementation. The
+// `Isa` is the vocabulary and `nvidia/` its one implementation. The
 // forwarding methods below are what the rest of codegen/ calls. A second
 // target is a second file here.
 //
@@ -395,8 +395,8 @@ pub(super) trait Isa {
     ) -> Result<Value<'c, 'c>>;
 }
 
-/// The target a config selects. A second vendor adds an arm here and a file
-/// beside `nvidia.rs`.
+/// The target a config selects. A second vendor adds an arm here and a
+/// module beside `nvidia/`.
 pub(super) fn isa_for(base: &phobos_base::context::Context) -> Box<dyn Isa> {
     match &base.gpu_config {
         GpuConfig::Nvidia(_) => Box::new(nvidia::Nvidia::new(

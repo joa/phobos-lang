@@ -1,7 +1,9 @@
 // Down to PTX: each new operation reaches one instruction, and none becomes
 // a libdevice call, which nothing links.
 
-use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+use phobos_base::context::Context;
+
+use super::base;
 
 const OPS: &str = "
 kernel ops(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64], I: tensor<i32>[N], n: i32) {
@@ -15,13 +17,8 @@ kernel ops(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64], I: tensor<i32>[N], n:
 }
 ";
 
-fn ptx(src: &str, chip: &str, index_bitwidth: u32) -> String {
-    let ctx = Context {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
-        index_bitwidth,
-        ..Context::default()
-    };
-    crate::compile_raw(&ctx, src).unwrap().code
+fn ptx(src: &str, chip: &str, index_bits: u32) -> String {
+    crate::compile_raw(&base(chip, index_bits), src).unwrap().code
 }
 
 #[test]
@@ -141,10 +138,8 @@ fn system_scope_reaches_ptx_widened() {
 fn f32_gemm_at_wide_indices_keeps_register_staging() {
     let pins = [("TILE_M", 64), ("TILE_N", 128), ("TILE_K", 16), ("U", 8), ("T", 128)];
     let ctx = Context {
-        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_120")),
-        index_bitwidth: 64,
         shape_overrides: pins.iter().map(|&(name, value)| (name.to_string(), value)).collect(),
-        ..Context::default()
+        ..base("sm_120", 64)
     };
     let code = crate::compile_raw(&ctx, include_str!("../../../../examples/gemm_fp32.ph")).unwrap().code;
     assert!(!code.contains("f32x2"), "packed f32 arithmetic in:\n{code}");

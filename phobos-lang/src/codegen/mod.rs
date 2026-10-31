@@ -26,6 +26,7 @@ mod tile;
 mod util;
 
 pub(crate) use crate::shape::DYN;
+use crate::shape::{alloc_align_div, fmt_dim, fmt_shape, row_major_strides};
 
 /// A row-reduction kind (rowmax / rowsum).
 #[derive(Clone, Copy)]
@@ -45,8 +46,6 @@ const QDOT_STEP: i64 = WARP * QDOT_LANE;
 
 const IMMA_TILE: i64 = 8;
 const IMMA_K: i64 = 16;
-
-const QMMA_TILES: i64 = 64;
 
 const WMMA_SMEM_PAD: i64 = 8;
 
@@ -556,7 +555,8 @@ impl<'c> Codegen<'c> {
         let needed_bytes = self.shared_bytes + 2 * stage_bytes;
         if needed_bytes > limit_bytes {
             self.pipeline_declines.push(format!(
-                "the gemm's doubled staging would need {needed_bytes} bytes of shared memory,                  over the {limit_bytes}-byte ceiling"
+                "the gemm's doubled staging would need {needed_bytes} bytes of shared memory, \
+                 over the {limit_bytes}-byte ceiling"
             ));
             return 1;
         }
@@ -565,46 +565,12 @@ impl<'c> Codegen<'c> {
     }
 }
 
-fn gcd(a: i64, b: i64) -> i64 {
-    let (a, b) = (a.abs(), b.abs());
-    if b == 0 { a } else { gcd(b, a % b) }
-}
-
-/// row-major strides for a shape ([`DYN`] propagates outward).
-fn row_major_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1i64; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        strides[i] = if shape[i + 1] == DYN || strides[i + 1] == DYN {
-            DYN
-        } else {
-            strides[i + 1] * shape[i + 1]
-        };
-    }
-    strides
-}
-
 fn int_list<T: ToString>(values: &[T]) -> String {
     values
         .iter()
         .map(|v| v.to_string())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn fmt_dim(d: i64) -> String {
-    if d == DYN {
-        "?".to_string()
-    } else {
-        d.to_string()
-    }
-}
-
-fn fmt_shape(shape: &[i64]) -> String {
-    shape
-        .iter()
-        .map(|&d| fmt_dim(d))
-        .collect::<Vec<_>>()
-        .join("x")
 }
 
 #[cfg(test)]

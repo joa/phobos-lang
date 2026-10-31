@@ -15,8 +15,8 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "padstage")
     }
 
-    /// Whether the kernel calls an intrinsic written for a module indexed at
-    /// 64 bits, as its `cp.async` staging needs.
+    /// Whether the kernel calls a `_qgemm_t` built-in, which loads its
+    /// operands with `ldmatrix` and so wants a module indexed at 64 bits.
     pub fn wants_ldmatrix(&self) -> bool {
         self.calls(|callee| callee.ends_with("_qgemm_t"))
     }
@@ -25,29 +25,27 @@ impl Kernel {
     /// None to decide alone, Some(true) for `@swizzle` or `@swizzle(on)`,
     /// which fails where it cannot, Some(false) for `@swizzle(off)`.
     pub fn swizzle_mode(&self) -> Result<Option<bool>, String> {
-        let Some(attr) = self.attrs.iter().find(|a| a.name == "swizzle") else {
-            return Ok(None);
-        };
-        match &attr.args[..] {
-            [] => Ok(Some(true)),
-            [AttrArg::Positional(Literal::Ident(v))] if v == "on" => Ok(Some(true)),
-            [AttrArg::Positional(Literal::Ident(v))] if v == "off" => Ok(Some(false)),
-            _ => Err("`@swizzle` takes `on` or `off`".to_string()),
-        }
+        self.switch("swizzle")
     }
 
     /// What `@pipeline` asks of the loops the compiler would double-buffer:
     /// None to decide alone, Some(true) for `@pipeline` or `@pipeline(on)`,
     /// which fails where nothing pipelines, Some(false) for `@pipeline(off)`.
     pub fn pipeline_mode(&self) -> Result<Option<bool>, String> {
-        let Some(attr) = self.attrs.iter().find(|a| a.name == "pipeline") else {
+        self.switch("pipeline")
+    }
+
+    /// `@name` as a switch: None when absent, Some(true) for `@name` or
+    /// `@name(on)`, Some(false) for `@name(off)`.
+    fn switch(&self, name: &str) -> Result<Option<bool>, String> {
+        let Some(attr) = self.attr(name) else {
             return Ok(None);
         };
         match &attr.args[..] {
             [] => Ok(Some(true)),
             [AttrArg::Positional(Literal::Ident(v))] if v == "on" => Ok(Some(true)),
             [AttrArg::Positional(Literal::Ident(v))] if v == "off" => Ok(Some(false)),
-            _ => Err("`@pipeline` takes `on` or `off`".to_string()),
+            _ => Err(format!("`@{name}` takes `on` or `off`")),
         }
     }
 
@@ -128,19 +126,6 @@ impl Kernel {
             [AttrArg::Positional(Literal::Int(n))] if *n >= 0 => Ok(Some(*n as usize)),
             _ => Err("`@grid_barriers` takes the kernel's barrier count, as `@grid_barriers(1)`".to_string()),
         }
-    }
-
-    /// The tiles `@registers(a, b, ..)` asks to keep in registers.
-    pub fn register_tiles(&self) -> Vec<String> {
-        self.attrs
-            .iter()
-            .filter(|a| a.name == "registers")
-            .flat_map(|a| a.args.iter())
-            .filter_map(|arg| match arg {
-                AttrArg::Positional(Literal::Ident(name)) => Some(name.clone()),
-                _ => None,
-            })
-            .collect()
     }
 
     /// `@index_bits(n)`: the index width the kernel asks for, 32 or 64, with

@@ -45,7 +45,7 @@ fn flash_scores_ride_in_fragments() {
     // the lanes, each row reduction folds a lane's columns and then its quad
     // with two xor shuffles, and the scores reach the second dot through one
     // shared tile.
-    let mlir = emit_mlir_sync(&flash(64, 64), "sm_80");
+    let mlir = emit_with(&flash(64, 64), "sm_80", 64);
     assert_eq!(mlir.matches("gpu.shuffle  xor").count() + mlir.matches("gpu.shuffle xor").count(), 8, "{mlir}");
     // Two dots, four 16x16 tiles a warp each, two m16n8k16 a tile and four
     // k steps of 16: one dot's 32 mma.sync, twice.
@@ -57,7 +57,7 @@ fn flash_row_statistics_ride_in_registers() {
     // Both accumulators give each warp whole rows, so the running max and
     // sum, the correction and the row sums stay in the lanes that hold
     // those rows: no [64, 1] column reaches shared memory.
-    let mlir = emit_mlir_sync(&flash(64, 64), "sm_80");
+    let mlir = emit_with(&flash(64, 64), "sm_80", 64);
     assert!(!mlir.contains("64x1xf32"), "{mlir}");
 }
 
@@ -67,7 +67,7 @@ fn scores_past_the_register_budget_stay_shared() {
     // of the accumulator, over the budget: the scores stay a shared tile.
     // A shared tile of scores that size takes `@dynshared`.
     let src = flash(128, 128).replace("@tensorcore", "@dynshared\n        @tensorcore");
-    let mlir = emit_mlir_sync(&src, "sm_80");
+    let mlir = emit_with(&src, "sm_80", 64);
     assert!(!mlir.contains("gpu.shuffle"), "{mlir}");
 }
 
@@ -77,39 +77,7 @@ fn flash_accumulator_rides_in_fragments() {
     // Every use of acc is fragment-representable, so it never exists in
     // shared memory. Its per-lane fragments ride the kt loop as iter_args,
     // and the epilogue scatters them straight to O.
-    let mlir = emit_mlir_sync(
-        "@autotune(D in [64], BR in [32], BC in [32])
-        @tensorcore
-        @launch(128)
-        @aligned(Nq = BR, Nk = BC)
-        kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
-                               V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = ctx.block.x
-            let row = pid * BR
-            let q = Q[row :+ BR, :]
-            var acc: tile<f32>[BR, D] = 0.0
-            var m: tile<f32>[BR, 1] = -65504.0
-            var l: tile<f32>[BR, 1] = 0.0
-            for kt in range(0, Nk, BC) {
-                let k = K[kt :+ BC, :]
-                let v = V[kt :+ BC, :]
-                var s: tile<f32>[BR, BC] = dot_t(q, k)
-                s = s * scale
-                var mnew: tile<f32>[BR, 1] = rowmax(s)
-                mnew = tmax(m, mnew)
-                s = exp(s - mnew)
-                var corr: tile<f32>[BR, 1] = exp(m - mnew)
-                l = l * corr
-                l += rowsum(s)
-                acc = acc * corr
-                acc += dot(s, v)
-                m = mnew
-            }
-            acc = acc / l
-            O[row :+ BR, :] = acc
-        }",
-        "sm_75",
-    );
+    let mlir = emit_with(FLASH, "sm_75", 64);
     assert_contains(
         &mlir,
         &[
@@ -138,39 +106,9 @@ fn flash_q_staging_hoists_to_the_loop_preheader() {
     // stores nothing to global memory. So q's f16 staging copy runs once in
     // the preheader instead of every iteration. q's subview is the first in
     // the kernel, so its loads print as "%subview[" exactly.
-    let src = "@autotune(D in [64], BR in [32], BC in [32])
-        @tensorcore
-        @launch(128)
-        @aligned(Nq = BR, Nk = BC)
-        kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
-                               V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = ctx.block.x
-            let row = pid * BR
-            let q = Q[row :+ BR, :]
-            var acc: tile<f32>[BR, D] = 0.0
-            var m: tile<f32>[BR, 1] = -65504.0
-            var l: tile<f32>[BR, 1] = 0.0
-            for kt in range(0, Nk, BC) {
-                let k = K[kt :+ BC, :]
-                let v = V[kt :+ BC, :]
-                var s: tile<f32>[BR, BC] = dot_t(q, k)
-                s = s * scale
-                var mnew: tile<f32>[BR, 1] = rowmax(s)
-                mnew = tmax(m, mnew)
-                s = exp(s - mnew)
-                var corr: tile<f32>[BR, 1] = exp(m - mnew)
-                l = l * corr
-                l += rowsum(s)
-                acc = acc * corr
-                acc += dot(s, v)
-                m = mnew
-            }
-            acc = acc / l
-            O[row :+ BR, :] = acc
-        }";
     // Both tensor-core paths hoist: mma.sync with a fragment-carrying kt
     // loop, and the WMMA fallback with a plain one.
-    for mlir in [emit_mlir_sync(src, "sm_75"), emit_mlir(src)] {
+    for mlir in [emit_with(FLASH, "sm_75", 64), emit_mlir(FLASH)] {
         let (preheader, body) = split_at_kt_loop(&mlir);
         assert!(
             preheader.contains("load %subview["),
@@ -187,7 +125,7 @@ fn flash_q_staging_hoists_to_the_loop_preheader() {
 fn dot_staging_stays_in_loop_when_body_stores_global() {
     // The body stores to O each iteration, and a hoisted copy of q would
     // miss global writes. So q must stage inside the loop.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(D in [64], BR in [32], BC in [32])
         @tensorcore
         @launch(128)
@@ -203,6 +141,7 @@ fn dot_staging_stays_in_loop_when_body_stores_global() {
             }
         }",
         "sm_75",
+        64,
     );
     let (preheader, body) = split_at_kt_loop(&mlir);
     assert!(
@@ -219,7 +158,7 @@ fn dot_staging_stays_in_loop_when_body_stores_global() {
 fn frag_acc_falls_back_on_unsanctioned_reads() {
     // rowsum(o) is not a fragment-representable use, so o stays a shared
     // tile.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
         @launch(256)
@@ -237,6 +176,7 @@ fn frag_acc_falls_back_on_unsanctioned_reads() {
             R[row :+ BR, :] = r
         }",
         "sm_75",
+        64,
     );
     assert_contains(&mlir, &["memref<64x64xf32, 3>", "nvgpu.mma.sync"]);
 }
@@ -354,7 +294,7 @@ fn tensorcore_dot_uses_wmma() {
 fn tensorcore_dot_t_uses_mma_sync() {
     // With 64-bit indices, dot_t (Q @ K.T) takes the mma.sync path:
     // ldmatrix and nvgpu.mma.sync over swizzled f16 staging, no WMMA.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
         @launch(256)
@@ -368,6 +308,7 @@ fn tensorcore_dot_t_uses_mma_sync() {
             S[row :+ BR, 0 :+ BC] = s
         }",
         "sm_75",
+        64,
     );
     assert_contains(
         &mlir,
@@ -392,7 +333,7 @@ fn tensorcore_dot_accumulate_rides_in_fragments() {
     // lives in shared memory. The mma.sync D fragments seed the MAC, and
     // the epilogue scatters them straight to O. The NN B operand is still
     // read transposed from its k-major staging.
-    let mlir = emit_mlir_sync(
+    let mlir = emit_with(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
         @launch(256)
@@ -407,6 +348,7 @@ fn tensorcore_dot_accumulate_rides_in_fragments() {
             O[row :+ BR, :] = o
         }",
         "sm_75",
+        64,
     );
     assert_contains(
         &mlir,

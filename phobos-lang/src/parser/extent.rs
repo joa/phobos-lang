@@ -123,16 +123,7 @@ fn expr(e: &mut Expr, scope: &Scope) {
         }
         ExprKind::Index { base, subs } => {
             expr(base, scope);
-            for sub in subs {
-                match sub {
-                    Sub::Point(e) | Sub::From(e) => expr(e, scope),
-                    Sub::Range { start: a, end: b } | Sub::Span { start: a, len: b } => {
-                        expr(a, scope);
-                        expr(b, scope);
-                    }
-                    Sub::Full => {}
-                }
-            }
+            subs.iter_mut().flat_map(Sub::exprs_mut).for_each(|e| expr(e, scope));
         }
         ExprKind::Call { args, .. } => args.iter_mut().for_each(|a| expr(a, scope)),
         ExprKind::Generate(g) => {

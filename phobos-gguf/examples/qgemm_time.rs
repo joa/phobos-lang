@@ -106,7 +106,7 @@ fn main() -> Result<()> {
         project()?;
         let fused = read_vec(gpu, out, rows * n)?;
         let scale = dense.iter().fold(0.0f64, |m, &v| m.max((v as f64).abs()));
-        let spread = fused.iter().zip(&dense).fold(0.0f64, |m, (&f, &d)| m.max((f as f64 - d as f64).abs())) / scale;
+        let spread = fused.iter().zip(&dense).map(|(&f, &d)| (f as f64 - d as f64).abs()).max_by(f64::total_cmp).unwrap_or(0.0) / scale;
         let verdict = if spread <= SPREAD_MAX { "ok" } else { "FAIL" };
         failed |= spread.is_nan() || spread > SPREAD_MAX;
         let start = Instant::now();

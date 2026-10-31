@@ -46,13 +46,5 @@ fn quants(block: &[u8]) -> [i8; BLOCK] {
 /// The quants and scales without decoding, as [`super::Spec::planes`]
 /// describes: one centred quant per element, one scale per block.
 fn planes(bytes: &[u8], k: usize, n: usize) -> Planes {
-    let blocks = k / BLOCK;
-    let mut qs = vec![0i8; k * n];
-    let mut scales = vec![0.0f32; blocks * n];
-    for (index, block) in bytes.chunks_exact(BLOCK_BYTES).enumerate() {
-        let (j, b) = (index / blocks, index % blocks);
-        scales[b * n + j] = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        qs[j * k + b * BLOCK..][..BLOCK].copy_from_slice(&quants(block));
-    }
-    Planes { qs, scales }
+    super::scaled_planes(bytes, k, n, BLOCK_BYTES, quants)
 }

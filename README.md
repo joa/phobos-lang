@@ -115,7 +115,7 @@ See [BENCHMARKS](./BENCHMARKS.md) for detailed results and more information.
 1. Download [minicpm5-1b-Q8_0.gguf](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF) from HuggingFace.
 2. Start the inference server with recommended model settings for temp etc.
   ```plain
-  cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf ~\models\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
+  cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf ~/models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
   ```
 3. [pi.dev](https://pi.dev) `~/.pi/agent/models.json` entry:
   ```json
@@ -159,7 +159,7 @@ Supported I/O protocols:
 - **`file://`**: Must be available to the `pod` processes (local, NFS, ...)
 
 ```plain
-source = /path/to/gemm_fp32.ph
+source = examples/matmul_cluster_fp32.ph
 dim M = 16384
 dim N = 16384
 dim K = 16384
@@ -175,7 +175,7 @@ scalar beta  = f32 1.5
 Running one scheduler and two pods on the same host.
 Reduce VRAM to 4 GiB per pod.
 
-1. **Start scheduler**: `cargo run -p phobos-sched -- --listen 0.0.0.0:8881 --nodes 2 --job .\examples\matmul_cluster_job.txt --autotune --vram 4294967296`
+1. **Start scheduler**: `cargo run -p phobos-sched -- --listen 0.0.0.0:8881 --nodes 2 --job examples/matmul_cluster_job.txt --autotune --vram 4294967296`
 2. **Start pod 0**: `cargo run -p phobos-pod -- --id 0 --sched 127.0.0.1:8881 --listen 0.0.0.0:8882 --arena 4294967296`
 3. **Start pod 1**: `cargo run -p phobos-pod -- --id 1 --sched 127.0.0.1:8881 --listen 0.0.0.0:8883 --arena 4294967296`
 4. Output will be written to the job's `tensor C` URI (`file:///data/C.bin` in the example above)
@@ -184,7 +184,7 @@ Reduce VRAM to 4 GiB per pod.
 $ cargo run -p phobos-sched --            \
   --listen 0.0.0.0:8881                   \
   --nodes 2                               \
-  --job .\examples\matmul_cluster_job.txt \
+  --job examples/matmul_cluster_job.txt \
   --autotune                              \
   --vram 4294967296
 phobos-sched: listening on 0.0.0.0:8881, waiting for 2 node(s)
@@ -208,20 +208,17 @@ Sample kernels (`.ph`) and job files live in [`examples/`](./examples).
 ### `phobos-cli` (optional GPU)
 
 ```plain
-cargo run [--features cuda] -r -p phobos-cli -- [--gguf <file.gguf>] [-m|--model <dir>] [--kv <dir>]
-                                                [-n|--num <tokens>] [--show <int>] [--listen <host:port>]
-                                                [-t|--temp <float>] [-k|--top-k <int>] [-p|--top-p <float>]
-                                                [--min-p <float>]
-                                                [--presence-penalty <float>] [--repetition-penalty <float>]
-                                                [--seed <int>] [--raw]
-                                                [prompt]
+cargo run [--features cuda] -r -p phobos-cli -- (--gguf FILE | --onnx DIR) [OPTIONS] [PROMPT]
 ```
 
-Runs inference.
+Runs inference. `--help` lists every option, and the [CLI reference](https://phobos-lang.dev/docs/reference/cli/) shows it.
 
-- `--gguf` loads a GGUF model and picks the forward pass from the architecture named in the file.
-- Without `--gguf`, it loads the exported ONNX engines: from `--kv` if that directory exists, otherwise from `--model`.
-- Without the `cuda` build feature it runs on the host backend. Both backends produce the same logits.
+- `--gguf FILE` loads a GGUF model and picks the forward pass from the architecture named in the file.
+- `--onnx DIR` loads an ONNX export: a `decoder.onnx` beside a `decoder_with_past.onnx` is the KV-cached engine, a
+  `model.onnx` the full-recompute one. `--tokenizer DIR` says where its vocabulary is, if not in `DIR`.
+- Without the `cuda` build feature it runs on the host backend, the reference the device path is checked against.
+- For a model larger than the card, `--expert-cache` and `--max-ram` size the device and host caches of its streamed
+  experts; `--ctx` and `--batch` bound the context and the prompt pass.
 
 With a prompt, it prints the model's answer and exits. Without one, it starts a REPL. The model stays loaded,
 and each line is answered on its own.
@@ -233,7 +230,7 @@ that is already a complete prompt.
 `--listen` starts a minimal OpenAI-compatible server:
 
 - endpoints: `/v1/completions`, `/v1/chat/completions` and `/v1/models`
-- responses stream over SSE
+- chat completions stream over SSE when a request asks; text completions do not stream
 - conversations and tool definitions are rendered with the model's own `tokenizer.chat_template`
 - the sampling flags above become defaults, and a request can override them
 - `--api-key KEY` (or `PHOBOS_API_KEY`) requires `Authorization: Bearer KEY` on every route. Without a key anyone who can reach the address can run inference, so binding a non-loopback address such as `0.0.0.0` with no key logs a warning
@@ -241,10 +238,13 @@ that is already a complete prompt.
 ### `phobos-compile` (no GPU)
 
 ```plain
-cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--stdlib <file.ph> | --no-std] [-o <out.ptx>]
+cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY> | --capability <CC>] [--index-bits 32|64] [--set NAME=VALUE]...
+                                 [--all-variants] [--check-races] [-o <out.ptx>] [--origin <map.json>]
+                                 [--stdlib <file.ph> | --no-std] [--color auto|always|never] [--error-format human|json]
 ```
 
-Compiles a kernel source to PTX, for `sm_75` by default. `--set` pins an `@autotune` parameter, which otherwise takes its first choice. `--all-variants` writes one file per remaining combination, `<out>_NAME-value_....ptx`. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
+Compiles a kernel source to PTX, for `sm_75` by default, and with `-o` writes each kernel's launch contract beside it as
+`<out>.json`. `--check-races` runs the host race check on every kernel it compiles. `--help` explains the rest. `--set` pins an `@autotune` parameter, which otherwise takes its first choice. `--all-variants` writes one file per remaining combination, `<out>_NAME-value_....ptx`. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
 
 ### `phobos-bench` (needs a GPU)
 
@@ -257,8 +257,26 @@ Measures a GGUF model the way `llama-bench` does, in the same units:
 - `pp<N>`: prompt processing speed for an N-token prompt
 - `tg<N>`: text generation speed over N tokens
 
-It prints one row per size. `-d N` runs the generation rows with N tokens already in the context. `--help` lists
-the other flags.
+It prints one row per size. `-d N` runs the prompt and generation rows with N tokens already in the context. `--help`
+lists the other flags.
+
+### `phobos-cache` (no GPU)
+
+```plain
+cargo run -r -p phobos-cache -- <warm|list|clear|prune> [--chip CHIP]... [--dir CACHE] [--manifest DIR]... [--jobs N]
+                                [--force] [--ptxas PATH | --no-ptxas] [KERNEL...]
+```
+
+Manages the compiled-kernel cache, one directory per chip. `warm` compiles the requests a run recorded with
+`PHOBOS_KERNEL_MANIFEST` for every supported chip, with no GPU; `list`, `clear` and `prune` inspect and trim it.
+
+### `ph2py` (no GPU)
+
+```plain
+cargo run -r -p phobos-compile --bin ph2py -- FILE.ph
+```
+
+Prints a Phobos source in its Python spelling, which the `phobos` package's front end reads back to the same module.
 
 ### `phobos-kbench` (needs a GPU)
 
@@ -273,6 +291,7 @@ checked against an f64 reference. The kernels:
 - `saxpy_fp32`
 - `gemm_fp32`
 - `gemm_fp32_unaligned`: `gemm_fp32` for sizes no tile divides, at 4000^3
+- `gemm_fp32_splitk`: `gemm_fp32` with the k-loop split across blocks and summed
 - `gemm_fp16tc_fp32acc`: f32 inputs rounded to f16 while staging, tensor cores, f32 accumulation
 - `gemm_fp16_fp32acc`: f16 inputs, tensor cores, f32 accumulation and output
 - `gemm_fp16`: f16 inputs, output and accumulation
@@ -291,13 +310,13 @@ It runs all of them by default. Useful flags:
 ### `phobos-sched`
 
 ```plain
-cargo run -r -p phobos-sched -- --listen <host:port> --nodes <n> --job <file>
+cargo run -r -p phobos-sched -- --nodes <n> --job <file> [--listen <host:port>]
                                 [--budget <bytes>] [--ingest direct|home-fetch]
                                 [--autotune [--vram <bytes>] [--link-bw <bytes/s>] [--leaf-flops <flop/s>]]
 ```
 
-The global scheduler daemon. It waits for `--nodes` pods to register, plans the job, sends each pod its part, and
-prints the URIs of the output tensors.
+The global scheduler daemon. It listens on `--listen` (default `0.0.0.0:7000`), waits for `--nodes` pods to
+register, plans the job, sends each pod its part, and prints the URIs of the output tensors.
 
 - `--budget` splits each node's work into segments that fit a memory budget.
 - `--autotune` picks the supertile sizes from a cost model. `--vram`, `--link-bw` and `--leaf-flops` override the
@@ -339,6 +358,9 @@ Run with `cargo run -p <crate> --example <name> -- <args>`.
 | Example | Crate | Syntax | What it does |
 | --- | --- | --- | --- |
 | `emit` | `phobos-lang` | `emit -- [file.ph]` | Prints the emitted MLIR (defaults to a built-in matmul). No GPU. |
+| `snapshot` | `phobos-lang` | `snapshot -- OUT_DIR SRC_DIR...` | The emit sweep: every `.ph` under the directories, emitted for every target the codegen distinguishes, to diff a codegen change before and after. No GPU. |
+| `race` | `phobos-lang` | `race -- [-v] PATH...` | The shared-memory race check, every thread of a CTA run on the host, over `.ph` or emitted `.mlir`. See [RACECHECK](RACECHECK.md). No GPU. |
+| `contract_check` | `phobos-lang` | `contract_check -- [--jobs N] DIR...` | Each kernel's launch contract against the `.entry` it compiled to, over a corpus and every target. No GPU. |
 | `dag_dot` | `phobos-cluster` | `dag_dot -- <file.ph> [out.dot]` | Renders a `@cluster` kernel's parametric cluster IR as Graphviz DOT. No GPU. |
 | `plan_dot` | `phobos-sched` | `plan_dot -- <job.txt> [--nodes N] [--ingest direct\|home-fetch] [out.dot]` | Lowers a job to the concrete per-node instruction DAG and renders it as Graphviz DOT. No GPU. |
 | `cluster_bench` | `phobos-sched` | `cluster_bench` | Analytic, CPU-only scheduler benchmark: planner throughput and cost-model quality as node count grows. No GPU. |
@@ -357,15 +379,17 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 | `inspect` | `phobos-gguf` | `inspect -- MODEL.gguf [--tensors] [--dump TENSOR]` | Metadata, tensor directory by shape, quantization histogram. No GPU. |
 | `generate` | `phobos-gguf` | `generate -- MODEL.gguf -n 40 "prompt"` | Host-backend generation, dispatching on the file's architecture. This is the reference path. No GPU. |
 | `encode` | `phobos-gguf` | `encode -- MODEL.gguf "text"` | Token ids from the file's own tokenizer, or JSON for a JSON array of prompts. No GPU. |
-| `diagnose` | `phobos-gguf` | `diagnose -- MODEL.gguf` | Loss per position on a repeated phrase. If it stays flat, the model is not using its context. No GPU. |
+| `diagnose` | `phobos-gguf` | `diagnose -- MODEL.gguf` | Loss per position on a repeated phrase, for a `qwen35` model. If it stays flat, the model is not using its context. No GPU. |
 | `inspect_onnx` | `phobos-onnx` | `inspect_onnx -- model.onnx` | Opset, inputs/outputs, op-type histogram. No GPU. |
-| `run_gpt2` | `phobos-onnx` | `run_gpt2` | A real exported GPT-2 through load, fold and the host interpreter, against its bundled reference. No GPU. |
-| `run_gpt2_gpu` | `phobos-onnx` | `run_gpt2_gpu` | The same model with the Gemm projections and all 25 LayerNorms on Phobos kernels. Needs a GPU. |
-| `kv_check` | `phobos-onnx` | `kv_check` | One decode step using the KV cache, checked against a full recompute. No GPU. |
+| `run_gpt2` | `phobos-onnx` | `run_gpt2 -- models/GPT2` | A real exported GPT-2 through load, fold and the host interpreter, against its bundled reference. No GPU. |
+| `run_gpt2_gpu` | `phobos-onnx` | `run_gpt2_gpu -- models/GPT2` | The same model with the Gemm projections and all 25 LayerNorms on Phobos kernels. Needs a GPU. |
+| `kv_check` | `phobos-onnx` | `kv_check -- models/gpt2-kv` | One decode step using the KV cache, checked against a full recompute. No GPU. |
 | `backend_check` | `phobos-gguf` | `backend_check` | Every device op against the host reference. Needs a GPU. |
-| `batch_check` | `phobos-gguf` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
+| `batch_check` | `phobos-gguf` | `batch_check -- [--gpu] MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one, on the host or with `--gpu` the device. |
 | `model_check` | `phobos-gguf` | `model_check -- MODEL.gguf [-p PROMPT]` | Whole-model logits, device against host. Needs a GPU. |
 | `fuse_check` | `phobos-gguf` | `fuse_check -- MODEL.gguf [-n STEPS]` | The fused decode path against the launched one, both on the device in one session. Needs a GPU. |
+| `attndecode` | `phobos-gguf` | `attndecode` | The decode attention path alone against cache length, with the card's measured copy bandwidth beside it. Needs a GPU. |
+| `quant_check` | `phobos-gguf` | `quant_check -- WIDE.gguf NARROW.gguf` | A quantized file against a wider one of the same model, tensor by tensor: what says a format decodes correctly. No GPU. |
 | `footprint` | `phobos-gguf` | `footprint -- MODEL.gguf` | What the model will occupy on the backend: weights, how much of that is f32, and the cache per token. Reports what the card has free under `--features cuda`. |
 
 `phobos-gguf/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,

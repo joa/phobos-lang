@@ -1,5 +1,5 @@
-// IQ3_S's decode geometry, shared by the contraction (`iq3s_qdot.rs`) and the
-// expansion (`qdecode.rs`). A lane has two four-wide grid entries, like
+// IQ3_S's decode geometry, which the staged projection (`qmma_signed.rs`)
+// decodes with. A lane has two four-wide grid entries, like
 // IQ3_XXS, and reads its sign index as one byte, like IQ2_S.
 
 use super::*;

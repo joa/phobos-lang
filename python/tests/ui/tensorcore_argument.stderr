@@ -1,0 +1,7 @@
+error: `@tensorcore` takes no argument, `wmma` or `sync`
+ --> tests/ui/tensorcore_argument.py:7:2
+  |
+7 | @ph.tensorcore("wmmma")
+  |  ^^^^^^^^^^^^^^^^^^^^^^ not an argument it reads
+
+error: aborting due to 1 previous error

@@ -1,6 +1,6 @@
 [package]
 name = "phobos-sched"
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 description = "Global scheduler: instantiate, place, lower, dispatch"
 readme.workspace = true
@@ -18,6 +18,4 @@ phobos-mlir = { path = "../phobos-mlir" }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
-prost.workspace = true
-futures.workspace = true
 sha2.workspace = true

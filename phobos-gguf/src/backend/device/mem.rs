@@ -31,8 +31,8 @@ pub(super) fn sensors() -> Option<phobos_inference::SensorSource> {
 /// What a [`Buf`] handle points at: an owned buffer that goes back to the
 /// pool, or a region of an arena.
 ///
-/// A constant is never released, so it lives in the arena rather than in an
-/// allocation of its own. See `arena.rs`.
+/// A constant is never released. It is an owned buffer by default, and a
+/// region of the hot arena with `PHOBOS_ARENA_CONST=1`. See `arena.rs`.
 pub(super) enum Slot {
     Owned(DeviceBuffer<f32>),
     Const {
@@ -75,7 +75,8 @@ const ACT_SHARED: usize = 2;
 const ACT_EXCLUSIVE: usize = ACT_RING + ACT_SHARED;
 
 impl DeviceBackend {
-    /// Uploads a constant into the arena. It is never released or read back.
+    /// Uploads a constant, which is never released or read back: into the
+    /// hot arena with `PHOBOS_ARENA_CONST=1`, else as a buffer of its own.
     pub(super) fn store_const(&self, data: &[f32]) -> Result<Buf> {
         if !self.arena_const {
             return self.upload(data);

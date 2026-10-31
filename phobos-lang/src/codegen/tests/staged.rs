@@ -93,7 +93,7 @@ const PIPELINED: &str = "@launch(128)
 fn a_loop_carrying_registers_pipelines_on_request() {
     // On sm_80 at 64-bit indices the staged prefix is copied with cp.async
     // into a pair of buffers, and the accumulators ride the loop.
-    let mlir = emit_mlir_sync(PIPELINED, "sm_80");
+    let mlir = emit_with(PIPELINED, "sm_80", 64);
     assert_contains(&mlir, &["nvgpu.device_async_copy", "iter_args", "math.fma"]);
 }
 
@@ -102,9 +102,9 @@ fn without_cp_async_the_next_stage_rides_in_registers() {
     // On sm_75 the next stage is loaded inside the guarded branch before
     // the contraction and stored after it, over the one buffer, where
     // sm_80 copies into a pair.
-    let mlir = emit_mlir_sync(PIPELINED, "sm_75");
+    let mlir = emit_with(PIPELINED, "sm_75", 64);
     assert!(!mlir.contains("device_async_copy"), "{mlir}");
-    let pair = tile_views(&emit_mlir_sync(PIPELINED, "sm_80"), "64x64xi8").len();
+    let pair = tile_views(&emit_with(PIPELINED, "sm_80", 64), "64x64xi8").len();
     assert!(tile_views(&mlir, "64x64xi8").len() < pair, "{mlir}");
     let fma = mlir.find("math.fma").expect("the contraction");
     let fetch = mlir[..fma].rfind("-> (vector<16xi8>").expect("the guarded loads yield their vectors");
@@ -118,7 +118,7 @@ fn a_barrier_before_the_stage_reads_orders_the_stores() {
     // the reads of `at` follow, so the turn needs no barrier of its own
     // after the stores: the explicit one replaces it.
     let fenced = PIPELINED.replace("let a0 = at", "barrier()\n            let a0 = at");
-    let count = |src: &str| emit_mlir_sync(src, "sm_75").matches("gpu.barrier").count();
+    let count = |src: &str| emit_with(src, "sm_75", 64).matches("gpu.barrier").count();
     assert!(count(&fenced) <= count(PIPELINED));
 }
 

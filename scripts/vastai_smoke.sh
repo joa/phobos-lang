@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Phobos smoke test on a rented vast.ai box. Logs everything to ~/smoke.log.
-#     bash vastai_smoke.sh [TAG]
+#     bash vastai_smoke.sh TAG
 set -uo pipefail
-TAG="${1:-v0.1.1}"
+TAG="${1:?usage: vastai_smoke.sh TAG, the release to test, e.g. v0.3.0}"
 WORK=/root/phobos
 LOG=/root/smoke.log
 MODEL_URL=https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use phobos_base::cli::format_size;
 use phobos_cluster::ir::ClusterProgram;
 use phobos_cluster::tile::ScalarValue;
 use phobos_sched::autotune::{ClusterFingerprint, RankedConfig, autotune};
@@ -105,17 +106,6 @@ fn timed<T>(iters: u32, mut f: impl FnMut() -> Result<T>) -> Result<(Duration, T
         last = f()?;
     }
     Ok((start.elapsed() / iters, last))
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let mut v = b as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", UNITS[u])
 }
 
 /// Bytes the busiest node fetches from peers under the plan. This is the
@@ -251,8 +241,8 @@ fn scaling(w: &Workload, size: i64, node_counts: &[u16], fp: ClusterFingerprint)
         println!(
             "{nodes:>6}  {:>22}  {instrs:>9}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:>7.2}x  {:>4.0}%",
             fmt_supers(rc),
-            fmt_bytes(rc.peak_resident),
-            fmt_bytes(plan.fetch_bytes),
+            format_size(rc.peak_resident),
+            format_size(plan.fetch_bytes),
             dur(rc.compute_sec),
             dur(comm_sec),
             dur(makespan),
@@ -306,7 +296,7 @@ fn main() -> Result<()> {
         "fingerprint: link {:.1} GB/s, leaf {:.1} TFLOP/s, vram {}",
         fp.link_bytes_per_sec / 1e9,
         fp.leaf_flops_per_sec / 1e12,
-        fmt_bytes(fp.vram_bytes),
+        format_size(fp.vram_bytes),
     );
     if cfg!(debug_assertions) {
         println!("note: debug build; rerun with --release for representative plan/iter rates");

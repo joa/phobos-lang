@@ -4,34 +4,23 @@
 
 name: website
 
+# No path filters: the site reads README, BENCHMARKS, SPEC, ENV, WINDOWS,
+# python/README.md and the tutorials, the stdlib, the lexer's keywords, the
+# quantized formats' sources, examples/ and results/, and its tests check them,
+# so a filter would have to track every one of those to keep its word.
 on:
   push:
     branches: [main]
-    paths:
-      - "website/**"
-      - "SPEC.md"
-      - "ENV.md"
-      - "BENCHMARKS.md"
-      - "WINDOWS.md"
-      - "examples/**"
-      - "phobos-lang/examples/*.ph"
-      - "phobos-lang/src/token.rs"
-      - "results/**"
-      - ".github/workflows/website.yml"
   pull_request:
-    paths:
-      - "website/**"
-      - ".github/workflows/website.yml"
+  # The footer names the latest release, read when the site builds.
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -41,6 +30,9 @@ jobs:
         working-directory: website
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A release event's ref is its tag; the site is always main's.
+          ref: ${{ github.event_name == 'release' && 'main' || '' }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -56,10 +48,15 @@ jobs:
         with:
           path: website/dist
 
+  # Only deploys share the Pages group, so a pull request's build never
+  # cancels a deploy waiting in it.
   deploy:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

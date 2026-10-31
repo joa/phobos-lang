@@ -4,7 +4,6 @@ use anyhow::{Result, bail};
 
 use crate::experts::ExpertSet;
 use crate::quant::{Packed, Quant};
-pub use crate::quant::quantize_row;
 
 mod fusion;
 mod moe;
@@ -411,7 +410,7 @@ pub trait Backend {
 
     /// [`Backend::matmul`] against a quantized weight. The activation is
     /// quantized to Q8_0, so the contraction is all integer. See
-    /// [`quantize_row`].
+    /// [`crate::quant::quantize_row`].
     fn matmul_quant(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
         self.matmul_quant_act(act, m, k, w, n, out)
@@ -442,11 +441,7 @@ pub trait Backend {
         n: usize,
         out: Buf,
     ) -> Result<()> {
-        let temp = self.alloc(m * n)?;
-        self.matmul_quant_act(act, m, k, w, n, temp)?;
-        self.add_into(out, temp)?;
-        self.release(temp);
-        Ok(())
+        quant_add_unfused(self, act, m, k, w, n, out)
     }
 
     /// Root-mean-square normalization with a per-channel gain, over each
@@ -665,18 +660,7 @@ pub trait Backend {
         spec: Rope,
         dest: Buf,
     ) -> Result<()> {
-        let width = spec.heads * spec.head_dim;
-        self.copy_2d(
-            src,
-            Plane {
-                buf: dest,
-                offset: 0,
-                pitch: width,
-            },
-            rows,
-            width,
-        )?;
-        self.rope(dest, rows, table, spec)
+        rope_gather_unfused(self, src, rows, table, spec, dest)
     }
 
     /// Causal softmax attention against the key and value caches, which must
@@ -819,6 +803,30 @@ pub fn read_vec(backend: &dyn Backend, buf: Buf, len: usize) -> Result<Vec<f32>>
     let mut out = vec![0.0; len];
     backend.read(buf, &mut out)?;
     Ok(out)
+}
+
+/// [`Backend::matmul_quant_add`] as a projection into a temporary and an add:
+/// the default, and what a backend that accumulates in the kernel falls back
+/// to for the shapes its kernel does not take.
+fn quant_add_unfused<B: Backend + ?Sized>(b: &B, act: QAct, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
+    let temp = b.alloc(m * n)?;
+    b.matmul_quant_act(act, m, k, w, n, temp)?;
+    b.add_into(out, temp)?;
+    b.release(temp);
+    Ok(())
+}
+
+/// [`Backend::rope_gather`] as [`Backend::copy_2d`] then [`Backend::rope`]:
+/// the default, and a fusing backend's fallback.
+fn rope_gather_unfused<B: Backend + ?Sized>(b: &B, src: Plane, rows: usize, table: Buf, spec: Rope, dest: Buf) -> Result<()> {
+    let width = spec.heads * spec.head_dim;
+    let dense = Plane {
+        buf: dest,
+        offset: 0,
+        pitch: width,
+    };
+    b.copy_2d(src, dense, rows, width)?;
+    b.rope(dest, rows, table, spec)
 }
 
 pub mod host;

@@ -9,7 +9,7 @@ use phobos_base::half::f16_to_f32;
 
 use super::tables::iq2::{KMASK_IQ2XS, KSIGNS_IQ2XS};
 use super::tables::iq3::IQ3XXS_GRID;
-use super::{RawScales, Spec};
+use super::{RawHeader, Spec};
 
 const BLOCK: usize = 256;
 const BLOCK_BYTES: usize = 98;
@@ -24,37 +24,8 @@ pub static SPEC: Spec = Spec {
     has_min: false,
     dequantize,
     planes: None,
-    raw_scales: Some(raw_scales),
+    raw_scales: Some(RawHeader::At { d: 0, dmin: None }),
 };
-
-fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
-    let mut d = Vec::with_capacity(bytes.len() / BLOCK_BYTES);
-    for block in bytes.chunks_exact(BLOCK_BYTES) {
-        d.push(u16::from_le_bytes([block[0], block[1]]));
-    }
-    RawScales { d, dmin: Vec::new() }
-}
-
-/// [`IQ3XXS_GRID`] flattened to one magnitude byte per slot, four per entry:
-/// `flat_grid()[i * 4 + j]` is byte `j` of `IQ3XXS_GRID[i]`. A lane's eight
-/// elements come from two entries.
-#[cfg(feature = "cuda")]
-pub(crate) fn flat_grid() -> Vec<i32> {
-    IQ3XXS_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(i32::from))
-        .collect()
-}
-
-/// [`flat_grid`]'s values as raw bytes. Entries are four bytes wide here, not
-/// eight, so a lane's two entries are two 32-bit loads rather than eight.
-#[cfg(feature = "cuda")]
-pub(crate) fn packed_grid() -> Vec<i8> {
-    IQ3XXS_GRID
-        .iter()
-        .flat_map(|entry| entry.to_le_bytes().map(|b| b as i8))
-        .collect()
-}
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {

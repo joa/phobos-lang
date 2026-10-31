@@ -225,6 +225,17 @@ fn atomic_add_on_floats() {
 }
 
 #[test]
+fn atomics_into_i32_narrow_a_wider_integer() {
+    let mlir = emit_mlir(
+        "kernel k(T: tensor<i32>[4]) {
+            let a = atomic_add(T, 0, i64(1))
+            let b = atomic_cas(T, 1, i8(0), i64(2))
+        }",
+    );
+    assert_contains(&mlir, &["arith.trunci", "arith.extsi", "memref.atomic_rmw addi"]);
+}
+
+#[test]
 fn unknown_attribute_is_an_error() {
     let e = emit_err("@fast_math\nkernel k(A: tensor<f32>[N]) { let i = ctx.block.x }");
     assert!(e.contains("unknown attribute `@fast_math`"), "got: {e}");

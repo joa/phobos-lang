@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 mod attrs;
 pub mod ctx;
 pub mod lanes;
+mod walk;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {
@@ -178,11 +179,6 @@ impl Kernel {
         env
     }
 
-    /// `@launch` at the autotune constants' first choices.
-    pub fn launch(&self) -> Result<Option<Launch>, String> {
-        self.launch_in(&self.shape_env(&HashMap::new()))
-    }
-
     /// `@launch` with each argument that names an `@autotune` constant taken
     /// from `env`.
     pub fn launch_in(&self, env: &BTreeMap<String, i64>) -> Result<Option<Launch>, String> {
@@ -252,7 +248,7 @@ impl Kernel {
     /// codegen ahead of this one.
     pub fn check_attributes(&self) -> Result<(), crate::diag::Diagnostics> {
         use crate::diag::{Diagnostic, Diagnostics};
-        let list: Vec<Diagnostic> = self
+        let mut list: Vec<Diagnostic> = self
             .attrs
             .iter()
             .filter(|a| !ATTRIBUTES.contains(&a.name.as_str()))
@@ -269,6 +265,17 @@ impl Kernel {
                 }
             })
             .collect();
+        // Any other argument would quietly pick the default path.
+        for a in self.attrs.iter().filter(|a| a.name == "tensorcore") {
+            if !matches!(&a.args[..], [] | [AttrArg::Positional(Literal::Ident(_))] if a.args.iter().all(|arg| {
+                matches!(arg, AttrArg::Positional(Literal::Ident(f)) if f == "wmma" || f == "sync")
+            })) {
+                list.push(
+                    Diagnostic::error("`@tensorcore` takes no argument, `wmma` or `sync`")
+                        .primary(a.span, "not an argument it reads"),
+                );
+            }
+        }
         if list.is_empty() {
             Ok(())
         } else {
@@ -279,6 +286,12 @@ impl Kernel {
     /// The attribute `@name`, if written.
     pub fn attr(&self, name: &str) -> Option<&Attribute> {
         self.attrs.iter().find(|a| a.name == name)
+    }
+
+    /// Where `@name` is written, or the kernel's name without it: where an
+    /// error about what the attribute asks for is shown.
+    pub fn attr_span(&self, name: &str) -> crate::diag::Span {
+        self.attr(name).map_or(self.name_span, |a| a.span)
     }
 
     /// The CTA size at the autotune constants' first choices.
@@ -459,19 +472,6 @@ impl From<ExprKind> for Expr {
     }
 }
 
-impl Sub {
-    /// Whether any expression in this subscript uses the given name.
-    pub fn uses_name(&self, name: &str) -> bool {
-        match self {
-            Sub::Point(e) => e.uses_name(name),
-            Sub::Range { start, end } => start.uses_name(name) || end.uses_name(name),
-            Sub::Span { start, len } => start.uses_name(name) || len.uses_name(name),
-            Sub::From(start) => start.uses_name(name),
-            Sub::Full => false,
-        }
-    }
-}
-
 impl Expr {
     pub fn new(kind: ExprKind, span: crate::diag::Span) -> Self {
         Expr { kind, span }
@@ -542,58 +542,6 @@ impl Expr {
             _ => None,
         }
     }
-
-    /// Visits this expression and its sub-expressions in pre-order.
-    pub fn walk(&self, f: &mut impl FnMut(&Expr)) {
-        f(self);
-        match &self.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Var(_) => {}
-            ExprKind::Unary { rhs, .. } => rhs.walk(f),
-            ExprKind::Binary { lhs, rhs, .. } => {
-                lhs.walk(f);
-                rhs.walk(f);
-            }
-            ExprKind::Index { base, subs } => {
-                base.walk(f);
-                for sub in subs {
-                    match sub {
-                        Sub::Point(e) | Sub::From(e) => e.walk(f),
-                        Sub::Range { start, end } => {
-                            start.walk(f);
-                            end.walk(f);
-                        }
-                        Sub::Span { start, len } => {
-                            start.walk(f);
-                            len.walk(f);
-                        }
-                        Sub::Full => {}
-                    }
-                }
-            }
-            ExprKind::Call { args, .. } => {
-                for arg in args {
-                    arg.walk(f);
-                }
-            }
-            ExprKind::Generate(g) => {
-                for stmt in &g.body {
-                    stmt.walk_exprs(f);
-                }
-                g.value.walk(f);
-            }
-        }
-    }
-
-    /// Whether this expression (or any sub-expression) reads the given name.
-    pub fn uses_name(&self, name: &str) -> bool {
-        let mut found = false;
-        self.walk(&mut |e| {
-            if let ExprKind::Var(n) = &e.kind {
-                found |= n == name;
-            }
-        });
-        found
-    }
 }
 
 impl Stmt {
@@ -618,102 +566,6 @@ impl Stmt {
                 name, ty, value, ..
             } => Some((name, ty.as_ref(), value.as_ref())),
             _ => None,
-        }
-    }
-
-    pub fn uses_name(&self, name: &str) -> bool {
-        let block = |b: &[Stmt]| b.iter().any(|s| s.uses_name(name));
-        match self {
-            Stmt::Let { name: n, value, .. } => n == name || value.uses_name(name),
-            Stmt::Var { name: n, value, .. } => {
-                n == name || value.as_ref().is_some_and(|v| v.uses_name(name))
-            }
-            Stmt::Assign { target, value, .. } => target.uses_name(name) || value.uses_name(name),
-            Stmt::For {
-                var,
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
-                var == name
-                    || start.uses_name(name)
-                    || end.uses_name(name)
-                    || step.as_ref().is_some_and(|e| e.uses_name(name))
-                    || block(body)
-            }
-            Stmt::While { cond, body, .. } => cond.uses_name(name) || block(body),
-            Stmt::If {
-                cond, then, r#else, ..
-            } => cond.uses_name(name) || block(then) || r#else.as_deref().is_some_and(block),
-            Stmt::Expr(e, _) => e.uses_name(name),
-        }
-    }
-
-    /// Visits every expression in this statement and its nested blocks, in
-    /// pre-order.
-    pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
-        match self {
-            Stmt::Let { value, .. } => value.walk(f),
-            Stmt::Var { value, .. } => {
-                if let Some(value) = value {
-                    value.walk(f);
-                }
-            }
-            Stmt::Assign { target, value, .. } => {
-                target.walk(f);
-                value.walk(f);
-            }
-            Stmt::For {
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
-                start.walk(f);
-                end.walk(f);
-                if let Some(step) = step {
-                    step.walk(f);
-                }
-                for stmt in body {
-                    stmt.walk_exprs(f);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                cond.walk(f);
-                for stmt in body {
-                    stmt.walk_exprs(f);
-                }
-            }
-            Stmt::If {
-                cond, then, r#else, ..
-            } => {
-                cond.walk(f);
-                for stmt in then.iter().chain(r#else.iter().flatten()) {
-                    stmt.walk_exprs(f);
-                }
-            }
-            Stmt::Expr(e, _) => e.walk(f),
-        }
-    }
-
-    /// Whether this statement writes or binds any of `names`, whether as an
-    /// assignment target, a let or a var.
-    pub fn writes_any(&self, names: &[&str]) -> bool {
-        let hits = |n: &str| names.contains(&n);
-        let block = |b: &[Stmt]| b.iter().any(|s| s.writes_any(names));
-        match self {
-            Stmt::Assign { target, .. } => match &target.kind {
-                ExprKind::Var(n) => hits(n),
-                ExprKind::Index { base, .. } => matches!(&base.kind, ExprKind::Var(n) if hits(n)),
-                _ => false,
-            },
-            Stmt::Let { name, .. } | Stmt::Var { name, .. } => hits(name),
-            Stmt::For { body, .. } | Stmt::While { body, .. } => block(body),
-            Stmt::If { then, r#else, .. } => block(then) || r#else.as_deref().is_some_and(block),
-            Stmt::Expr(..) => false,
         }
     }
 }

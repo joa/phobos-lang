@@ -4,8 +4,8 @@ OPTIONS:
   -m, --model FILE      the GGUF file to run (default: models/Qwen3.5-0.8B-Q8_0.gguf)
   -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
   -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
-  -d, --n-depth N,...   positions in the context before each tg row starts,
-                        one set of tg rows per depth (default: 0)
+  -d, --n-depth N,...   positions in the context before each pp and tg row
+                        starts, one set of rows per depth (default: 0)
   -r, --repetitions N   timed repetitions per row (default: 3)
   -b, --batch-size N    tokens a prompt is handed over in at a time, its logits
                         read back after each batch (default: 2048)

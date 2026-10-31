@@ -463,7 +463,7 @@ const HANDOFF: &str = "kernel wait(F: tensor<i32>[1, 1], Y: tensor<f32>[1, 64], 
 
 #[test]
 fn system_scope_access_is_one_thread_and_a_fence() {
-    let mlir = emit_mlir_sync(HANDOFF, "sm_75");
+    let mlir = emit_with(HANDOFF, "sm_75", 64);
     assert_contains(
         &mlir,
         &["ld.acquire.sys.global.u32", "fence.acq_rel.sys", "st.release.sys.global.u32", "scf.while"],

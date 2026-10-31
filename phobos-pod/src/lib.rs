@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::TcpListenerStream;
 
 use phobos_cluster::tile::NodeId;
@@ -29,15 +29,7 @@ pub async fn serve(
     let rt = Handle::current();
     let (complete_tx, complete_rx) = mpsc::unbounded_channel();
     let (fail_tx, fail_rx) = mpsc::unbounded_channel();
-    let (idle_tx, _idle_rx) = oneshot::channel();
-    let engine = Engine::spawn(
-        rt,
-        node_id,
-        arena_bytes,
-        Some(complete_tx),
-        Some(fail_tx),
-        idle_tx,
-    )?;
+    let engine = Engine::spawn(rt, node_id, arena_bytes, complete_tx, fail_tx)?;
 
     let addr: SocketAddr = listen_addr.parse().context("invalid listen address")?;
     let listener = TcpListener::bind(addr).await?;

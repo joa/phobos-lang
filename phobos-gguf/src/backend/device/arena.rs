@@ -63,27 +63,10 @@ impl Arena {
     /// A region larger than a slab gets a slab of its own.
     pub(super) fn upload<T: DeviceCopy>(&self, data: &[T]) -> Result<u64> {
         let bytes = std::mem::size_of_val(data);
-        let want = bytes.next_multiple_of(ALIGN);
-        let mut slabs = self.slabs.borrow_mut();
-        let at = match slabs.iter().position(|(s, used)| s.len() - used >= want) {
-            Some(at) => at,
-            None => {
-                let slab = match self.slab.get() {
-                    0 => slab_bytes(),
-                    n => n,
-                };
-                // SAFETY: nothing reads a slab before a weight is copied in.
-                slabs.push((unsafe { DeviceBuffer::uninitialized(want.max(slab))? }, 0));
-                slabs.len() - 1
-            }
-        };
-        let (slab, used) = &mut slabs[at];
-        let at = slab.as_device_ptr().as_raw() + *used as u64;
-        *used += want;
-        self.handed.set(self.handed.get() + want);
+        let at = self.take(bytes)?;
         cuda_ok(
-            // SAFETY: `at` is `want >= bytes` of live slab, and the copy is
-            // synchronous, so `data` outlives it.
+            // SAFETY: `take` handed out at least `bytes` of live slab, and the
+            // copy is synchronous, so `data` outlives it.
             unsafe { cust::sys::cuMemcpyHtoD_v2(at, data.as_ptr().cast(), bytes) },
             "uploading a weight into the arena",
         )?;

@@ -99,7 +99,7 @@ impl Qgemm {
 
     pub(super) fn grid4(&self) -> Result<u64> {
         if self.grid4.borrow().is_none() {
-            *self.grid4.borrow_mut() = Some(DeviceBuffer::from_slice(&crate::quant::iq1s_grid4())?);
+            *self.grid4.borrow_mut() = Some(DeviceBuffer::from_slice(&crate::quant::iq1_s::grid4())?);
         }
         Ok(self
             .grid4
@@ -112,7 +112,7 @@ impl Qgemm {
 
     pub(super) fn grid2(&self) -> Result<u64> {
         if self.grid2.borrow().is_none() {
-            *self.grid2.borrow_mut() = Some(DeviceBuffer::from_slice(&crate::quant::iq1s_grid2())?);
+            *self.grid2.borrow_mut() = Some(DeviceBuffer::from_slice(&crate::quant::iq1_s::grid2())?);
         }
         Ok(self
             .grid2

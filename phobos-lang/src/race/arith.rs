@@ -3,13 +3,13 @@
 
 use super::exec::Mem;
 use super::program::Arith;
+use crate::shape::{DYN, row_major_strides};
 
+/// [`row_major_strides`] over sizes that may be unknown: a stride past an
+/// unknown size is unknown.
 pub(super) fn row_major(sizes: &[Option<i64>]) -> Vec<Option<i64>> {
-    let mut out = vec![Some(1); sizes.len()];
-    for d in (0..sizes.len().saturating_sub(1)).rev() {
-        out[d] = out[d + 1].zip(sizes[d + 1]).map(|(a, b)| a * b);
-    }
-    out
+    let shape: Vec<i64> = sizes.iter().map(|s| s.unwrap_or(DYN)).collect();
+    row_major_strides(&shape).into_iter().map(|s| (s != DYN).then_some(s)).collect()
 }
 
 /// The element an index lands on, counted from the view's base.

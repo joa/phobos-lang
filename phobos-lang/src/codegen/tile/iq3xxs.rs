@@ -1,5 +1,5 @@
-// IQ3_XXS's decode geometry, shared by the contraction (`iq3xxs_qdot.rs`) and
-// the expansion (`qdecode.rs`). Each lane does two four-wide grid lookups and
+// IQ3_XXS's decode geometry, which the staged projection (`qmma_signed.rs`)
+// decodes with. Each lane does two four-wide grid lookups and
 // one sign lookup. The aux32 scale and sign field is laid out as in IQ2_XXS,
 // so that geometry is shared.
 

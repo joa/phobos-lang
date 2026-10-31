@@ -1,7 +1,11 @@
 // Construction of a `DeviceBackend`: the CUDA context, the compiled kernels,
-// the grid tables the IQ formats gather from, and the environment knobs.
+// the grid tables the IQ formats decode with, and the environment knobs.
 
 use super::*;
+use crate::quant::tables::iq1::IQ1S_GRID;
+use crate::quant::tables::iq2::{IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, KSIGNS_IQ2XS};
+use crate::quant::tables::iq3::{IQ3S_GRID, IQ3XXS_GRID};
+use crate::quant::tables::{packed, packed_signs};
 
 impl DeviceBackend {
     /// A backend whose raw-format kernels cover `quants`, the formats of the
@@ -92,38 +96,16 @@ impl DeviceBackend {
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
         let argmax_finish = compile(&argmax_finish_src(), &[], "argmax_finish")?;
         let formats = formats::build(&formats::to_build(quants))?;
-        let iq1s_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_flat_grid())?;
-        let iq2xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_grid())?;
-        let iq2xxs_signs = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_signs())?;
-        let iq2s_grid = DeviceBuffer::from_slice(&crate::quant::iq2s_flat_grid())?;
-        let iq2s_signs = DeviceBuffer::from_slice(&crate::quant::iq2s_flat_signs())?;
-        let iq2xs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xs_flat_grid())?;
-        let iq3xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq3xxs_flat_grid())?;
-        let iq3s_grid = DeviceBuffer::from_slice(&crate::quant::iq3s_flat_grid())?;
-        let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4xs_flat_codebook())?;
-        let iq1s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq1s_packed_grid())?;
-        let iq1s_signed_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_signed_grid())?;
-        let iq2xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xxs_packed_grid())?;
-        let iq2xxs_signs_packed = DeviceBuffer::from_slice(
-            &[
-                crate::quant::iq2xxs_packed_signs(),
-                crate::quant::iq2xxs_sign_masks(),
-            ]
-            .concat(),
-        )?;
-        let iq2s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2s_packed_grid())?;
-        let iq2s_signs_packed = DeviceBuffer::from_slice(
-            &[
-                crate::quant::iq2s_packed_signs(),
-                crate::quant::iq2s_sign_masks(),
-            ]
-            .concat(),
-        )?;
-        let iq2xs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xs_packed_grid())?;
-        let iq3xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3xxs_packed_grid())?;
-        let iq3s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3s_packed_grid())?;
-        let iota: Vec<i32> = (0..8).collect();
-        let iota8 = DeviceBuffer::from_slice(&iota)?;
+        let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4_xs::flat_codebook())?;
+        let iq1s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ1S_GRID, u64::to_le_bytes))?;
+        let iq1s_signed_grid = DeviceBuffer::from_slice(&crate::quant::iq1_s::signed_grid())?;
+        let iq2xxs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2XXS_GRID, u64::to_le_bytes))?;
+        let iq2xxs_signs_packed = DeviceBuffer::from_slice(&packed_signs(KSIGNS_IQ2XS.iter().copied()))?;
+        let iq2s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2S_GRID, u64::to_le_bytes))?;
+        let iq2s_signs_packed = DeviceBuffer::from_slice(&packed_signs(0..=255))?;
+        let iq2xs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ2XS_GRID, u64::to_le_bytes))?;
+        let iq3xxs_grid_packed = DeviceBuffer::from_slice(&packed(&IQ3XXS_GRID, u32::to_le_bytes))?;
+        let iq3s_grid_packed = DeviceBuffer::from_slice(&packed(&IQ3S_GRID, u32::to_le_bytes))?;
 
         residency::vram_mark("kernels compiled and loaded");
         Ok(DeviceBackend {
@@ -227,7 +209,6 @@ impl DeviceBackend {
             argmax_finish,
             argmax_scratch: RefCell::new(None),
             blocked: RefCell::new(HashMap::new()),
-            attn_gemm: RefCell::new(HashMap::new()),
             attn_tc: RefCell::new(HashMap::new()),
             attn_tc_on: env_flag_on("PHOBOS_ATTN_TC"),
             attn_flash: RefCell::new(HashMap::new()),
@@ -270,30 +251,20 @@ impl DeviceBackend {
             moe_gather_add: RefCell::new(HashMap::new()),
             moe_shared: RefCell::new(HashMap::new()),
             formats,
-            iq1s_grid,
-            iq2xxs_grid,
             iq2xxs_signs_packed,
-            iq2s_grid,
             iq2s_signs_packed,
-            iq2xs_grid,
-            iq3xxs_grid,
-            iq3s_grid,
             iq4xs_codebook,
             iq1s_grid_packed,
             iq1s_signed_grid,
             raw_qmma: Cell::new(env_flag_on("PHOBOS_RAW_QMMA")),
             raw_qmma_formats: qmma_formats(),
             qgemm: qmma_raw::Qgemm::from_env(),
-            dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
             trim_after_dense: env_flag("PHOBOS_TRIM"),
             iq2xxs_grid_packed,
-            iq2xxs_signs,
             iq2s_grid_packed,
-            iq2s_signs,
             iq2xs_grid_packed,
             iq3xxs_grid_packed,
             iq3s_grid_packed,
-            iota8,
             act_scratch: RefCell::new(Vec::new()),
             act_arena: arena::Arena::with_slab(arena::ACT_SLAB_BYTES),
             act_ring: Cell::new(0),

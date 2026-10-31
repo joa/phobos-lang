@@ -24,14 +24,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result, ensure};
 use memmap2::Mmap;
 
-pub use backend::{Backend, Buf, HostBackend};
 pub use bpe::Bpe;
-pub use meta::{Array, Metadata, Value, ValueType};
 pub use model::Decoder;
-pub use quant::{Packed, Planes, Quant, Spec};
+pub use quant::Quant;
 pub use runtime::GgufModel;
-pub use tensor::{GgmlType, TensorInfo, dequantize_into, f16_to_f32};
-pub use vocab::{TokenType, Vocab};
+pub use tensor::{GgmlType, TensorInfo, dequantize_into};
+
+use meta::Metadata;
+use vocab::Vocab;
 
 /// Where a [`Gguf`]'s bytes live.
 enum Backing {

@@ -20,11 +20,6 @@ use super::{Ir, OpKind};
 use super::build::{Report, Target, locate};
 use crate::ast::Kernel;
 
-/// Where `@name` is written, or the kernel's name without it.
-fn attr_span(kernel: &Kernel, name: &str) -> crate::diag::Span {
-    kernel.attr(name).map_or(kernel.name_span, |a| a.span)
-}
-
 /// Runs every pass over `ir`, in order. `kernel` only places an error at the
 /// attribute it concerns; no pass reads the source.
 ///
@@ -35,14 +30,14 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
     // need, and where its scratch lives. A held scratch becomes a shared
     // tile like any other for the passes after.
     let mut held = std::collections::BTreeSet::new();
+    let written = ir.all_ops().into_iter().filter(|&op| matches!(ir.kind(op), OpKind::GridBarrier)).count();
     if let Some(blocks) = ir.kernel.persistent_blocks {
         let grid = super::uniform::analyze_blocks(ir);
         let owners = owner::Owners::new(ir, blocks, &grid);
         held = scratch::held(ir, &owners, &kernel.named_by("global"));
         scratch::check_shared(ir, &held, &kernel.named_by("shared"))
-            .map_err(|e| locate(&kernel.source, ir, e, attr_span(kernel, "shared")))?;
+            .map_err(|e| locate(&kernel.source, ir, e, kernel.attr_span("shared")))?;
         let placement = gridbar::plan(ir, &owners, &grid, &held);
-        let written = ir.all_ops().into_iter().filter(|&op| matches!(ir.kind(op), OpKind::GridBarrier)).count();
         for (op, later, earlier) in &placement.before {
             phobos_base::phdebug!(
                 "kernel `{}`: a grid barrier before {} orders its {} after {}",
@@ -52,19 +47,12 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
                 ir.print_op(earlier.op).trim()
             );
         }
-        let total = written + placement.before.len();
-        let at = attr_span(kernel, "grid_barriers");
-        match kernel.grid_barriers().map_err(|e| locate(&kernel.source, ir, anyhow!(e), at))? {
-            Some(n) if n != total => {
-                let e = anyhow!(
-                    "`@grid_barriers({n})`: the kernel has {total}, {written} written and {} placed where blocks share data",
-                    placement.before.len()
-                );
-                return Err(locate(&kernel.source, ir, e, at));
-            }
-            _ => {}
-        }
+        check_grid_barriers(ir, kernel, written, placement.before.len())?;
         gridbar::insert(ir, &placement, &mut report.spans);
+    } else {
+        // Only `@persistent(n)` places barriers; any other kernel has the
+        // ones it writes.
+        check_grid_barriers(ir, kernel, written, 0)?;
     }
     scratch::place(ir, &held);
 
@@ -86,11 +74,27 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
 
     // The swizzle reads which tiles the tensor-core fragments load, so it
     // runs once those reads are final.
-    let at = kernel.attr("swizzle").map_or(kernel.name_span, |a| a.span);
+    let at = kernel.attr_span("swizzle");
     let mode = kernel
         .swizzle_mode()
         .map_err(|e| locate(&kernel.source, ir, anyhow!(e), at))?;
     swizzle::decide(ir, mode).map_err(|e| locate(&kernel.source, ir, e, at))
+}
+
+/// `@grid_barriers(n)` against the barriers the kernel has, `written` in the
+/// source and `placed` by the compiler.
+fn check_grid_barriers(ir: &Ir, kernel: &Kernel, written: usize, placed: usize) -> Result<()> {
+    let at = kernel.attr_span("grid_barriers");
+    match kernel.grid_barriers().map_err(|e| locate(&kernel.source, ir, anyhow!(e), at))? {
+        Some(n) if n != written + placed => {
+            let e = anyhow!(
+                "`@grid_barriers({n})`: the kernel has {}, {written} written and {placed} placed where blocks share data",
+                written + placed
+            );
+            Err(locate(&kernel.source, ir, e, at))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

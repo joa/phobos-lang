@@ -3,19 +3,19 @@ pub mod codegen;
 pub mod contract;
 pub mod diag;
 pub mod ir;
-pub mod lexer;
+pub(crate) mod lexer;
 pub mod parser;
 pub mod race;
 mod report;
 pub(crate) mod shape;
-pub mod stdlib;
+pub(crate) mod stdlib;
 pub mod stubs;
-pub mod token;
+pub(crate) mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
 
 pub use contract::Contract;
-pub use report::{LaunchReport, ScratchParam, launch_report, launch_report_source};
+pub use report::{LaunchReport, ScratchParam, launch_report};
 
 /// Parses `src`. A failure is a [`diag::Diagnostics`] whose locations are
 /// bare `line:col`; [`parse_source`] names the file.
@@ -170,7 +170,9 @@ pub fn compile_source(
 
     if context.print_phases {
         println!("=== AST ===========================");
-        println!("{:?}", kernels.first().unwrap());
+        for kernel in &kernels {
+            println!("{kernel:?}");
+        }
         println!("===================================");
     }
 
@@ -217,15 +219,9 @@ fn emit_unlowered(
     context: &phobos_base::context::Context,
     kernels: &[ast::Kernel],
 ) -> anyhow::Result<codegen::EmitOutput> {
-    use melior::dialect::DialectRegistry;
     use melior::ir::{Location, Module};
-    use melior::utility::register_all_dialects;
 
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let mlir = melior::Context::new();
-    mlir.append_dialect_registry(&registry);
-    mlir.load_all_available_dialects();
+    let mlir = phobos_mlir::context();
     let module = Module::new(Location::unknown(&mlir));
     codegen::emit(context, kernels, &mlir, &module)
 }
@@ -284,14 +280,14 @@ pub fn index_bits(context: &phobos_base::context::Context, kernels: &[ast::Kerne
 
 /// Whether a module of `kernels` is indexed at 64 bits on the context's
 /// chip, whatever width was asked for, when no kernel says with
-/// `@index_bits`. The `@tensorcore` path's `mma.sync`,
-/// `ldmatrix` and a system-scope load or store need it on any chip. So does
-/// `cp.async` from sm_80 on, which a module is widened for when, emitted at
-/// 64 bits, it copies asynchronously; one that never does keeps the narrower
-/// index, which is cheaper.
+/// `@index_bits`. What [`ast::Kernel::wide_index_reason`] names needs it on
+/// any chip: the `@tensorcore` path's `mma.sync`, `ldmatrix` and a
+/// system-scope load or store. So does `cp.async` from sm_80 on, which a
+/// module is widened for when, emitted at 64 bits, it copies
+/// asynchronously; one that never does keeps the narrower index, which is
+/// cheaper.
 pub fn needs_wide_index(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> bool {
-    requires_wide_index(kernels)
-        || kernels.iter().any(|k| k.wants_ldmatrix() || k.wants_system_scope())
+    kernels.iter().any(|k| k.wide_index_reason().is_some())
         || (context.gpu_config.compute_capability() >= 80 && copies_async_when_wide(context, kernels))
 }
 
@@ -301,10 +297,6 @@ fn copies_async_when_wide(context: &phobos_base::context::Context, kernels: &[as
     // A module that fails to emit fails again in the compile that follows,
     // which reports it.
     emit_unlowered(&wide, kernels).is_ok_and(|out| out.copies_async)
-}
-
-pub fn requires_wide_index(kernels: &[ast::Kernel]) -> bool {
-    kernels.iter().any(|k| k.wants_mma_sync())
 }
 
 /// The @autotune search dims (name, choices) of a kernel.

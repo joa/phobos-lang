@@ -15,16 +15,17 @@ pub(super) struct Kernel {
 /// no such kernel.
 #[derive(Default)]
 pub(super) struct FormatKernels {
-    /// The masked matvec, for any `m` and a ragged `n`.
+    /// Q3_K's masked matvec, for more than one row and a ragged `n`.
     pub(super) matvec: Option<Kernel>,
     /// The `m == 1` decode as one `*_qdot_t` call, with no shared-memory
     /// staging. Needs `n` to be a multiple of its tile.
     pub(super) qdot: Option<Kernel>,
-    /// The decode without the reduction. Writes a `[K, N]` strip of
-    /// dequantized weight for [`DeviceBackend::project_raw_dense`].
+    /// A row-major format's decode without the reduction, masked: writes a
+    /// `[K, N]` strip of dequantized weight for
+    /// [`DeviceBackend::project_raw_dense`].
     pub(super) dequant: Option<Kernel>,
-    /// The lanes form of `dequant`, writing an f32 strip, then the same
-    /// writing an f16 one. Needs a strip that is
+    /// A grouped format's decode without the reduction, written with lanes:
+    /// an f32 strip, then the same writing an f16 one. Needs a strip that is
     /// a multiple of its tile.
     pub(super) qdecode: [Option<Kernel>; 2],
     /// The prompt projection, decoding inside an integer tensor-core
@@ -60,7 +61,6 @@ fn spec(quant: Quant) -> Option<Spec> {
     Some(match quant {
         Quant::Q2_K => Spec {
             tn: Q2K_TN,
-            matvec: Some((q2k_matvec_src, "q2k_matvec")),
             dequant: Some((q2k_dequant_src, "q2k_dequant")),
             ..NONE
         },
@@ -71,63 +71,54 @@ fn spec(quant: Quant) -> Option<Spec> {
         },
         Quant::IQ1_S => Spec {
             tn: IQ1S_TN,
-            matvec: Some((iq1s_matvec_src, "iq1s_matvec")),
             qdot: Some((iq1s_qdot_matvec_src, "iq1s_qdot_matvec")),
-            dequant: Some((iq1s_dequant_src, "iq1s_dequant")),
             qdecode: Some((iq1s_qdecode_src, "iq1s_qdecode")),
             qmma: Some((iq1s_qmma_src, "iq1s_qmma")),
+            ..NONE
         },
         Quant::IQ1_M => Spec {
             tn: IQ1M_TN,
-            matvec: Some((iq1m_matvec_src, "iq1m_matvec")),
             qdot: Some((iq1m_qdot_matvec_src, "iq1m_qdot_matvec")),
-            dequant: Some((iq1m_dequant_src, "iq1m_dequant")),
             qdecode: Some((iq1m_qdecode_src, "iq1m_qdecode")),
-            qmma: None,
+            ..NONE
         },
         Quant::IQ2_XXS => Spec {
             tn: IQ2XXS_TN,
-            matvec: Some((iq2xxs_matvec_src, "iq2xxs_matvec")),
             qdot: Some((iq2xxs_qdot_matvec_src, "iq2xxs_qdot_matvec")),
-            dequant: Some((iq2xxs_dequant_src, "iq2xxs_dequant")),
             qdecode: Some((iq2xxs_qdecode_src, "iq2xxs_qdecode")),
             qmma: Some((iq2xxs_qmma_src, "iq2xxs_qmma")),
+            ..NONE
         },
         Quant::IQ2_XS => Spec {
             tn: IQ2XS_TN,
-            matvec: Some((iq2xs_matvec_src, "iq2xs_matvec")),
             qdot: Some((iq2xs_qdot_matvec_src, "iq2xs_qdot_matvec")),
-            dequant: Some((iq2xs_dequant_src, "iq2xs_dequant")),
             qdecode: Some((iq2xs_qdecode_src, "iq2xs_qdecode")),
             qmma: Some((iq2xs_qmma_src, "iq2xs_qmma")),
+            ..NONE
         },
         Quant::IQ2_S => Spec {
             tn: IQ2S_TN,
-            matvec: Some((iq2s_matvec_src, "iq2s_matvec")),
             qdot: Some((iq2s_qdot_matvec_src, "iq2s_qdot_matvec")),
-            dequant: Some((iq2s_dequant_src, "iq2s_dequant")),
             qdecode: Some((iq2s_qdecode_src, "iq2s_qdecode")),
             qmma: Some((iq2s_qmma_src, "iq2s_qmma")),
+            ..NONE
         },
         Quant::IQ3_XXS => Spec {
             tn: IQ3XXS_TN,
-            matvec: Some((iq3xxs_matvec_src, "iq3xxs_matvec")),
             qdot: Some((iq3xxs_qdot_matvec_src, "iq3xxs_qdot_matvec")),
-            dequant: Some((iq3xxs_dequant_src, "iq3xxs_dequant")),
             qdecode: Some((iq3xxs_qdecode_src, "iq3xxs_qdecode")),
             qmma: Some((iq3xxs_qmma_src, "iq3xxs_qmma")),
+            ..NONE
         },
         Quant::IQ3_S => Spec {
             tn: IQ3S_TN,
-            matvec: Some((iq3s_matvec_src, "iq3s_matvec")),
             qdot: Some((iq3s_qdot_matvec_src, "iq3s_qdot_matvec")),
-            dequant: Some((iq3s_dequant_src, "iq3s_dequant")),
             qdecode: Some((iq3s_qdecode_src, "iq3s_qdecode")),
             qmma: Some((iq3s_qmma_src, "iq3s_qmma")),
+            ..NONE
         },
         Quant::IQ4_XS => Spec {
             tn: IQ4XS_TN,
-            matvec: Some((iq4xs_matvec_src, "iq4xs_matvec")),
             dequant: Some((iq4xs_dequant_src, "iq4xs_dequant")),
             ..NONE
         },

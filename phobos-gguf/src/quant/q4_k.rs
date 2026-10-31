@@ -9,7 +9,7 @@
 
 use phobos_base::half::f16_to_f32;
 
-use super::{RawScales, Spec};
+use super::{RawHeader, Spec};
 
 const BLOCK: usize = 256;
 const BLOCK_BYTES: usize = 144;
@@ -26,25 +26,10 @@ pub static SPEC: Spec = Spec {
     has_min: true,
     dequantize,
     planes: None,
-    raw_scales: Some(raw_scales),
+    // The kernels read both from the block itself; the planes only give the
+    // upload the shape every raw format shares. Q5_K's header is the same.
+    raw_scales: Some(RawHeader::At { d: 0, dmin: Some(2) }),
 };
-
-/// Each block's header `d` (offset 0) and `dmin` (offset 2), for Q4_K and
-/// Q5_K. The kernels read both from the block itself; these planes only give
-/// the upload the shape every raw format shares.
-pub(super) fn header_scales(bytes: &[u8], block_bytes: usize) -> RawScales {
-    let mut d = Vec::with_capacity(bytes.len() / block_bytes);
-    let mut dmin = Vec::with_capacity(d.capacity());
-    for block in bytes.chunks_exact(block_bytes) {
-        d.push(u16::from_le_bytes([block[0], block[1]]));
-        dmin.push(u16::from_le_bytes([block[2], block[3]]));
-    }
-    RawScales { d, dmin }
-}
-
-fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
-    header_scales(bytes, BLOCK_BYTES)
-}
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {

@@ -1,6 +1,6 @@
 [package]
 name = "phobos-compile"
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 description = "Compiles a Phobos kernel source to PTX for one chip"
 readme.workspace = true

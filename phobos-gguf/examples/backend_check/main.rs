@@ -55,11 +55,14 @@ fn main() -> Result<()> {
         let (lo, hi) = want
             .iter()
             .fold((f32::MAX, f32::MIN), |(l, h), &w| (l.min(w), h.max(w)));
+        // `total_cmp` ranks NaN above every number: a NaN error is the worst one,
+        // where `f32::max` would drop it.
         let gap = want
             .iter()
             .zip(got)
             .map(|(w, g)| (w - g).abs())
-            .fold(0.0f32, f32::max);
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
         gap / (hi - lo).max(f32::MIN_POSITIVE)
     }
 
@@ -83,7 +86,8 @@ fn main() -> Result<()> {
             .iter()
             .zip(got)
             .map(|(w, g)| (w - g).abs() / w.abs().max(1.0))
-            .fold(0.0f32, f32::max);
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
         worst.set(worst.get().max(error));
         // f32 reductions in a different order will not match bit for bit; a
         // layout mistake would be orders of magnitude worse than this.
@@ -114,7 +118,8 @@ fn main() -> Result<()> {
             .iter()
             .zip(got)
             .map(|(w, g)| (w - g).abs() / w.abs().max(floor))
-            .fold(0.0f32, f32::max);
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
         worst.set(worst.get().max(error));
         let ok = error < 1e-2 && want.len() == got.len();
         if !ok {

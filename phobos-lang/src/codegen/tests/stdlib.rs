@@ -82,7 +82,7 @@ const CALLS: &[&str] = &[
 fn every_library_function_compiles() {
     for call in CALLS {
         emit_mlir(&probe(call));
-        emit_mlir_sync(&probe(call), "sm_80");
+        emit_with(&probe(call), "sm_80", 64);
     }
 }
 
@@ -122,7 +122,7 @@ fn matmul_is_the_k_loop_written_out() {
     );
     let called = SGEMM.replace("LOOP", "matmul(acc, A, B, pm * TILE_M, pn * TILE_N, TILE_K)");
     assert_eq!(emit_mlir(&called), emit_mlir(&written));
-    assert_eq!(emit_mlir_sync(&called, "sm_80"), emit_mlir_sync(&written, "sm_80"));
+    assert_eq!(emit_with(&called, "sm_80", 64), emit_with(&written, "sm_80", 64));
 }
 
 const FLASH: &str = "@tensorcore
@@ -167,9 +167,9 @@ fn online_softmax_and_attention_are_flash_attention_written_out() {
     let update = FLASH.replace("BODY", &FLASH_LOOP.replace("UPDATE", "online_softmax(acc, m, l, s, v)"));
     let whole = FLASH.replace("BODY", "attention(acc, q, K, V, scale, BR, BC)");
     for chip in ["sm_75", "sm_80"] {
-        let want = emit_mlir_sync(&written, chip);
-        assert_eq!(emit_mlir_sync(&update, chip), want, "online_softmax on {chip}");
-        assert_eq!(emit_mlir_sync(&whole, chip), want, "attention on {chip}");
+        let want = emit_with(&written, chip, 64);
+        assert_eq!(emit_with(&update, chip, 64), want, "online_softmax on {chip}");
+        assert_eq!(emit_with(&whole, chip, 64), want, "attention on {chip}");
     }
 }
 

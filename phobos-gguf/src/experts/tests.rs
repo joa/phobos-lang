@@ -1,12 +1,10 @@
 use phobos_base::half::{f16_to_f32, f32_to_f16};
 
 use super::*;
+use crate::GgmlType;
 use crate::quant::grouped::group_rows;
 use crate::quant::q8_0_units;
-use crate::tests::{Builder, ggml_code};
-
-/// Q4_K's ggml type code.
-pub(crate) const Q4_K: u32 = 12;
+use crate::tests::{Builder, ggml_type};
 
 /// `count` experts of `[n, k]` Q4_K blocks with deterministic contents:
 /// small finite headers, pseudo-random scales and quants.
@@ -30,7 +28,7 @@ pub(crate) fn stack_file(name: &str, count: usize, n: usize, k: usize, seed: u64
     let bytes = q4k_stack(count, n, k, seed);
     let file = Builder::default()
         .kv_string("general.architecture", "qwen35moe")
-        .tensor_raw(name, &[k as u64, n as u64, count as u64], Q4_K, &bytes)
+        .tensor_raw(name, &[k as u64, n as u64, count as u64], GgmlType::Q4_K, &bytes)
         .build();
     (Gguf::from_bytes(file).unwrap(), bytes)
 }
@@ -66,7 +64,7 @@ fn a_stack_decodes_an_expert_as_the_file_reader_does() {
     let mut got = vec![0.0f32; n * k];
     stack.dequantize(1, &mut got).unwrap();
     let mut whole = vec![0.0f32; count * n * k];
-    crate::dequantize_into(crate::GgmlType::Q4_K, &bytes, &mut whole).unwrap();
+    crate::dequantize_into(GgmlType::Q4_K, &bytes, &mut whole).unwrap();
     assert_eq!(got, whole[n * k..]);
     assert!(got.iter().all(|v| v.is_finite()));
 }
@@ -90,7 +88,7 @@ fn a_q6_k_stack_groups_its_blocks_without_the_trailing_scale() {
     let (count, n, k) = (2, 16, 512);
     let mut words = crate::tests::xorshift(13);
     let bytes: Vec<u8> = (0..count * n * k / 256 * 210).map(|_| (words() >> 56) as u8).collect();
-    let file = Builder::default().tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_code(Quant::Q6_K), &bytes).build();
+    let file = Builder::default().tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_type(Quant::Q6_K), &bytes).build();
     let stack = ExpertStack::load(&Gguf::from_bytes(file).unwrap(), "w", count, n, k).unwrap();
     let expert = stack.expert(1);
     let mut got = vec![0u8; stack.grouped_bytes()];
@@ -126,19 +124,19 @@ fn a_set_loads_its_three_stacks() {
         .tensor_raw(
             "blk.0.ffn_gate_exps.weight",
             &[d_model as u64, d_ff as u64, count as u64],
-            Q4_K,
+            GgmlType::Q4_K,
             &q4k_stack(count, d_ff, d_model, 1),
         )
         .tensor_raw(
             "blk.0.ffn_up_exps.weight",
             &[d_model as u64, d_ff as u64, count as u64],
-            Q4_K,
+            GgmlType::Q4_K,
             &q4k_stack(count, d_ff, d_model, 2),
         )
         .tensor_raw(
             "blk.0.ffn_down_exps.weight",
             &[d_ff as u64, d_model as u64, count as u64],
-            Q4_K,
+            GgmlType::Q4_K,
             &q4k_stack(count, d_model, d_ff, 3),
         )
         .build();
@@ -166,7 +164,7 @@ fn q80_stack(count: usize, n: usize, k: usize, seed: u64) -> Vec<u8> {
 fn q80_file(count: usize, n: usize, k: usize) -> Gguf {
     let file = Builder::default()
         .kv_string("general.architecture", "qwen35moe")
-        .tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_code(Quant::Q8_0), &q80_stack(count, n, k, 9))
+        .tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_type(Quant::Q8_0), &q80_stack(count, n, k, 9))
         .build();
     Gguf::from_bytes(file).unwrap()
 }

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
+use phobos_base::half::f16_to_f32;
 
-/// Block scales are stored as halves throughout the GGUF quantizations.
-pub use phobos_base::half::f16_to_f32;
+use crate::quant::Quant;
+use crate::quant::ptq1_0::{FILE_BLOCK, FILE_BLOCK_BYTES};
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,128 +40,105 @@ pub enum GgmlType {
     PTQ1_0,
 }
 
+/// One [`GgmlType`]: its code in the file, its name, the elements and bytes
+/// of one block, and the format [`crate::quant`] contracts it as, `None` for
+/// a type that goes down a dense path.
+struct Row {
+    ty: GgmlType,
+    code: u32,
+    name: &'static str,
+    block: usize,
+    bytes: usize,
+    quant: Option<Quant>,
+}
+
+const fn row(ty: GgmlType, code: u32, name: &'static str, block: usize, bytes: usize, quant: Option<Quant>) -> Row {
+    Row { ty, code, name, block, bytes, quant }
+}
+
+/// Every type the reader knows, in the enum's order.
+const TYPES: [Row; 30] = [
+    row(GgmlType::F32, 0, "F32", 1, 4, None),
+    row(GgmlType::F16, 1, "F16", 1, 2, None),
+    row(GgmlType::Q4_0, 2, "Q4_0", 32, 18, Some(Quant::Q4_0)),
+    row(GgmlType::Q4_1, 3, "Q4_1", 32, 20, Some(Quant::Q4_1)),
+    row(GgmlType::Q5_0, 6, "Q5_0", 32, 22, Some(Quant::Q5_0)),
+    row(GgmlType::Q5_1, 7, "Q5_1", 32, 24, Some(Quant::Q5_1)),
+    row(GgmlType::Q8_0, 8, "Q8_0", 32, 34, Some(Quant::Q8_0)),
+    row(GgmlType::Q8_1, 9, "Q8_1", 32, 36, Some(Quant::Q8_1)),
+    row(GgmlType::Q2_K, 10, "Q2_K", 256, 84, Some(Quant::Q2_K)),
+    row(GgmlType::Q3_K, 11, "Q3_K", 256, 110, Some(Quant::Q3_K)),
+    row(GgmlType::Q4_K, 12, "Q4_K", 256, 144, Some(Quant::Q4_K)),
+    row(GgmlType::Q5_K, 13, "Q5_K", 256, 176, Some(Quant::Q5_K)),
+    row(GgmlType::Q6_K, 14, "Q6_K", 256, 210, Some(Quant::Q6_K)),
+    row(GgmlType::Q8_K, 15, "Q8_K", 256, 292, None),
+    row(GgmlType::IQ2_XXS, 16, "IQ2_XXS", 256, 66, Some(Quant::IQ2_XXS)),
+    row(GgmlType::IQ2_XS, 17, "IQ2_XS", 256, 74, Some(Quant::IQ2_XS)),
+    row(GgmlType::IQ3_XXS, 18, "IQ3_XXS", 256, 98, Some(Quant::IQ3_XXS)),
+    row(GgmlType::IQ1_S, 19, "IQ1_S", 256, 50, Some(Quant::IQ1_S)),
+    row(GgmlType::IQ4_NL, 20, "IQ4_NL", 32, 18, None),
+    row(GgmlType::IQ3_S, 21, "IQ3_S", 256, 110, Some(Quant::IQ3_S)),
+    row(GgmlType::IQ2_S, 22, "IQ2_S", 256, 82, Some(Quant::IQ2_S)),
+    row(GgmlType::IQ4_XS, 23, "IQ4_XS", 256, 136, Some(Quant::IQ4_XS)),
+    row(GgmlType::I8, 24, "I8", 1, 1, None),
+    row(GgmlType::I16, 25, "I16", 1, 2, None),
+    row(GgmlType::I32, 26, "I32", 1, 4, None),
+    row(GgmlType::I64, 27, "I64", 1, 8, None),
+    row(GgmlType::F64, 28, "F64", 1, 8, None),
+    row(GgmlType::IQ1_M, 29, "IQ1_M", 256, 56, Some(Quant::IQ1_M)),
+    row(GgmlType::BF16, 30, "BF16", 1, 2, None),
+    row(GgmlType::PTQ1_0, 143, "PTQ1_0", FILE_BLOCK, FILE_BLOCK_BYTES, Some(Quant::PTQ1_0)),
+];
+
+// `GgmlType::row` indexes the table by discriminant.
+const _: () = {
+    let mut i = 0;
+    while i < TYPES.len() {
+        assert!(TYPES[i].ty as usize == i, "TYPES lists the types in the enum's order");
+        i += 1;
+    }
+};
+
 impl GgmlType {
+    fn row(self) -> &'static Row {
+        &TYPES[self as usize]
+    }
+
     pub fn from_code(code: u32) -> Result<GgmlType> {
-        Ok(match code {
-            0 => GgmlType::F32,
-            1 => GgmlType::F16,
-            2 => GgmlType::Q4_0,
-            3 => GgmlType::Q4_1,
-            6 => GgmlType::Q5_0,
-            7 => GgmlType::Q5_1,
-            8 => GgmlType::Q8_0,
-            9 => GgmlType::Q8_1,
-            10 => GgmlType::Q2_K,
-            11 => GgmlType::Q3_K,
-            12 => GgmlType::Q4_K,
-            13 => GgmlType::Q5_K,
-            14 => GgmlType::Q6_K,
-            15 => GgmlType::Q8_K,
-            16 => GgmlType::IQ2_XXS,
-            17 => GgmlType::IQ2_XS,
-            18 => GgmlType::IQ3_XXS,
-            19 => GgmlType::IQ1_S,
-            20 => GgmlType::IQ4_NL,
-            21 => GgmlType::IQ3_S,
-            22 => GgmlType::IQ2_S,
-            23 => GgmlType::IQ4_XS,
-            24 => GgmlType::I8,
-            25 => GgmlType::I16,
-            26 => GgmlType::I32,
-            27 => GgmlType::I64,
-            28 => GgmlType::F64,
-            29 => GgmlType::IQ1_M,
-            30 => GgmlType::BF16,
-            143 => GgmlType::PTQ1_0,
-            other => bail!("unknown or retired ggml tensor type {other}"),
-        })
+        match TYPES.iter().find(|row| row.code == code) {
+            Some(row) => Ok(row.ty),
+            None => bail!("unknown or retired ggml tensor type {code}"),
+        }
+    }
+
+    /// The type's number in the file format.
+    pub fn code(self) -> u32 {
+        self.row().code
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            GgmlType::F32 => "F32",
-            GgmlType::F16 => "F16",
-            GgmlType::Q4_0 => "Q4_0",
-            GgmlType::Q4_1 => "Q4_1",
-            GgmlType::Q5_0 => "Q5_0",
-            GgmlType::Q5_1 => "Q5_1",
-            GgmlType::Q8_0 => "Q8_0",
-            GgmlType::Q8_1 => "Q8_1",
-            GgmlType::Q2_K => "Q2_K",
-            GgmlType::Q3_K => "Q3_K",
-            GgmlType::Q4_K => "Q4_K",
-            GgmlType::Q5_K => "Q5_K",
-            GgmlType::Q6_K => "Q6_K",
-            GgmlType::Q8_K => "Q8_K",
-            GgmlType::IQ2_XXS => "IQ2_XXS",
-            GgmlType::IQ2_XS => "IQ2_XS",
-            GgmlType::IQ3_XXS => "IQ3_XXS",
-            GgmlType::IQ1_S => "IQ1_S",
-            GgmlType::IQ4_NL => "IQ4_NL",
-            GgmlType::IQ3_S => "IQ3_S",
-            GgmlType::IQ2_S => "IQ2_S",
-            GgmlType::IQ4_XS => "IQ4_XS",
-            GgmlType::I8 => "I8",
-            GgmlType::I16 => "I16",
-            GgmlType::I32 => "I32",
-            GgmlType::I64 => "I64",
-            GgmlType::F64 => "F64",
-            GgmlType::IQ1_M => "IQ1_M",
-            GgmlType::BF16 => "BF16",
-            GgmlType::PTQ1_0 => "PTQ1_0",
-        }
+        self.row().name
     }
 
     pub fn block_size(self) -> usize {
-        match self {
-            GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::F64
-            | GgmlType::I8
-            | GgmlType::I16
-            | GgmlType::I32
-            | GgmlType::I64 => 1,
-            GgmlType::Q4_0
-            | GgmlType::Q4_1
-            | GgmlType::Q5_0
-            | GgmlType::Q5_1
-            | GgmlType::Q8_0
-            | GgmlType::Q8_1
-            | GgmlType::IQ4_NL => 32,
-            GgmlType::PTQ1_0 => crate::quant::ptq1_0::FILE_BLOCK,
-            _ => 256,
-        }
+        self.row().block
     }
 
     pub fn type_size(self) -> usize {
-        match self {
-            GgmlType::F32 | GgmlType::I32 => 4,
-            GgmlType::F16 | GgmlType::BF16 | GgmlType::I16 => 2,
-            GgmlType::I8 => 1,
-            GgmlType::F64 | GgmlType::I64 => 8,
-            GgmlType::Q4_0 | GgmlType::IQ4_NL => 18,
-            GgmlType::Q4_1 => 20,
-            GgmlType::Q5_0 => 22,
-            GgmlType::Q5_1 => 24,
-            GgmlType::Q8_0 => 34,
-            GgmlType::Q8_1 => 36,
-            GgmlType::Q2_K => 84,
-            GgmlType::Q3_K => 110,
-            GgmlType::Q4_K => 144,
-            GgmlType::Q5_K => 176,
-            GgmlType::Q6_K => 210,
-            GgmlType::Q8_K => 292,
-            GgmlType::IQ2_XXS => 66,
-            GgmlType::IQ2_XS => 74,
-            GgmlType::IQ3_XXS => 98,
-            GgmlType::IQ1_S => 50,
-            GgmlType::IQ3_S => 110,
-            GgmlType::IQ2_S => 82,
-            GgmlType::IQ4_XS => 136,
-            GgmlType::IQ1_M => 56,
-            GgmlType::PTQ1_0 => crate::quant::ptq1_0::FILE_BLOCK_BYTES,
-        }
+        self.row().bytes
+    }
+
+    /// The compute format for this type, for the types this crate contracts
+    /// against. Everything else, the scalar types included, is `None` and
+    /// goes down a dense path.
+    pub fn quant(self) -> Option<Quant> {
+        self.row().quant
+    }
+
+    /// Every type, for the tests that walk them all.
+    #[cfg(test)]
+    pub(crate) fn all() -> impl Iterator<Item = GgmlType> {
+        TYPES.iter().map(|row| row.ty)
     }
 
     pub fn is_dequantizable(self) -> bool {

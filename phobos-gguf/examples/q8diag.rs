@@ -7,7 +7,8 @@
 // order, which is why `backend_check` does not require a bit-for-bit match.
 use anyhow::Result;
 use phobos_base::half::{f16_to_f32, f32_to_f16};
-use phobos_gguf::backend::{Backend, HostBackend, quantize_row, read_vec};
+use phobos_gguf::backend::{Backend, HostBackend, read_vec};
+use phobos_gguf::quant::quantize_row;
 use phobos_gguf::quant::pack_q8_0;
 
 use phobos_gguf::backend::device;

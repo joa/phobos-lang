@@ -103,24 +103,6 @@ impl Value {
         }
     }
 
-    pub fn value_type(&self) -> ValueType {
-        match self {
-            Value::U8(_) => ValueType::U8,
-            Value::I8(_) => ValueType::I8,
-            Value::U16(_) => ValueType::U16,
-            Value::I16(_) => ValueType::I16,
-            Value::U32(_) => ValueType::U32,
-            Value::I32(_) => ValueType::I32,
-            Value::F32(_) => ValueType::F32,
-            Value::Bool(_) => ValueType::Bool,
-            Value::String(_) => ValueType::String,
-            Value::Array(_) => ValueType::Array,
-            Value::U64(_) => ValueType::U64,
-            Value::I64(_) => ValueType::I64,
-            Value::F64(_) => ValueType::F64,
-        }
-    }
-
     pub fn preview(&self) -> String {
         const MAX_CHARS: usize = 96;
         const MAX_ITEMS: usize = 6;

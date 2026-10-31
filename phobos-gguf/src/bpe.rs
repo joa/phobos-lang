@@ -89,10 +89,6 @@ impl Bpe {
         self.bos
     }
 
-    pub fn vocab_size(&self) -> usize {
-        self.decoder.len()
-    }
-
     /// Encodes text, matching special tokens literally and BPE-merging the rest.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         self.bpe.encode(text, &self.specials, |symbol| {
@@ -142,15 +138,10 @@ mod tests {
             pre: Some("qwen35".into()),
             tokens,
             token_types,
-            scores: Vec::new(),
             merges: vec![("h".into(), "i".into()), ("\u{0120}".into(), "th".into())],
             bos: None,
             eos: Some(eos),
-            pad: None,
-            unk: None,
-            sep: None,
             add_bos: false,
-            add_eos: false,
             chat_template: None,
         }
     }

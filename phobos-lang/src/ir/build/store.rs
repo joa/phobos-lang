@@ -90,7 +90,7 @@ impl Build {
             && let Some(fmt) = staged_qmma_format(callee)
             && f32_target
         {
-            let mut operands = self.iq2xxs_qmma_operands(callee, args)?.to_vec();
+            let mut operands = self.staged_qmma_operands(callee, args)?.to_vec();
             operands.push(target);
             self.stmt(OpKind::IntrinsicInto(Intrinsic::RawQmmaStaged(fmt)), &operands);
             return Ok(());

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -100,7 +99,6 @@ struct State {
 
 struct Inner {
     state: Mutex<State>,
-    completed: AtomicU64,
     registered: Notify,
     complete: Notify,
 }
@@ -115,7 +113,6 @@ impl Scheduler {
         Scheduler {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
-                completed: AtomicU64::new(0),
                 registered: Notify::new(),
                 complete: Notify::new(),
             }),
@@ -462,7 +459,6 @@ impl Scheduler {
             a
         });
 
-        self.inner.completed.store(0, Ordering::SeqCst);
         {
             let mut st = self.state();
             st.completed_iids.clear();
@@ -675,19 +671,11 @@ impl Default for Scheduler {
 }
 
 fn seg_summary(seg: &Segment) -> String {
-    const NAMES: [&str; 6] = ["ALLOC", "LOAD", "FETCH", "COMPUTE", "STORE", "FREE"];
-    let mut counts = [0u32; 6];
+    let mut counts = [0u32; Op::NAMES.len()];
     for i in &seg.instructions {
-        counts[match i.op {
-            Op::Alloc { .. } => 0,
-            Op::Load { .. } => 1,
-            Op::Fetch { .. } => 2,
-            Op::Compute { .. } => 3,
-            Op::Store { .. } => 4,
-            Op::Free { .. } => 5,
-        }] += 1;
+        counts[i.op.index()] += 1;
     }
-    NAMES
+    Op::NAMES
         .iter()
         .zip(counts)
         .filter(|(_, n)| *n > 0)
@@ -750,9 +738,6 @@ impl SchedulerSvc for Scheduler {
                         inner.registered.notify_waiters();
                     }
                     proto::node_message::Payload::Complete(c) => {
-                        inner
-                            .completed
-                            .fetch_add(c.batch.len() as u64, Ordering::SeqCst);
                         inner
                             .state
                             .lock()

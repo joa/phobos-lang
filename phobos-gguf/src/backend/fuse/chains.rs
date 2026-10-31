@@ -67,7 +67,7 @@ pub(crate) fn mlp_chain(
     chain
 }
 
-/// Whether a raw format has a `<fmt>_qdot_i8_t` the pass can emit.
+/// Whether a raw format has a lane decode the pass can emit.
 fn has_fused_decode(quant: Quant) -> bool {
     matches!(quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K)
 }
@@ -75,7 +75,7 @@ fn has_fused_decode(quant: Quant) -> bool {
 /// [`mlp_chain`] over raw-format weights, with gate and up as two separate
 /// weights. A unit is a run of [`RAW_UNIT`] outputs.
 ///
-/// `None` for a format without a `<fmt>_qdot_i8_t`, or a width that
+/// `None` for a format without a lane decode, or a width that
 /// [`RAW_UNIT`] does not divide.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mlp_chain_raw(

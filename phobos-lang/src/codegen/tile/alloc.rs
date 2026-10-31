@@ -35,15 +35,12 @@ impl<'c> Codegen<'c> {
             let name = format!("__{}_tile{}", self.kernel_name, k);
             let mem = self.planned_view(block, t.into(), offset, plan.peak)?;
             let mem = self.assume_align(block, mem, 16)?;
-            let align_div = row_major_strides(shape)[..shape.len() - 1]
-                .iter()
-                .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
             return Ok(MemVal {
                 mem,
                 elem,
                 shape: shape.to_vec(),
                 row_stride: None,
-                align_div,
+                align_div: alloc_align_div(shape),
                 swizzle: None,
                 global: Some(name),
                 shared: true,
@@ -112,10 +109,6 @@ impl<'c> Codegen<'c> {
 
         let mem = self.assume_align(block, mem, 16)?;
 
-        let align_div = row_major_strides(shape)[..shape.len() - 1]
-            .iter()
-            .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
-
         if self.dynamic_shared {
             self.dynamic_live += 1;
         }
@@ -125,7 +118,7 @@ impl<'c> Codegen<'c> {
             elem,
             shape: shape.to_vec(),
             row_stride: None,
-            align_div,
+            align_div: alloc_align_div(shape),
             swizzle: None,
             global: Some(name),
             shared: true,
@@ -345,6 +338,26 @@ impl<'c> Codegen<'c> {
         mv.shape = shape.to_vec();
 
         Ok(mv)
+    }
+
+    /// A tile buffer laid out as a graph value's `layout` says: padded when
+    /// it has a row stride, swizzled when it has a swizzle, plain otherwise.
+    /// The pitch and the permutation are the allocators' own, which the
+    /// build's layouts are made to match.
+    pub(in crate::codegen) fn alloc_tile_as(
+        &mut self,
+        block: &Block<'c>,
+        elem: Type<'c>,
+        shape: &[i64],
+        layout: &crate::ir::Layout,
+    ) -> Result<MemVal<'c>> {
+        if layout.row_stride.is_some() {
+            self.alloc_tile_padded(block, elem, shape)
+        } else if layout.swizzle.is_some() {
+            self.alloc_tile_swizzled(block, elem, shape)
+        } else {
+            self.alloc_tile_shaped(block, elem, shape)
+        }
     }
 
     /// Aliases a tile as one row `[1, rows * cols]`. Nothing is allocated and

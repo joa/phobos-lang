@@ -286,13 +286,13 @@ impl<'a> Analyzer<'a> {
 
     /// Whether `e` reads the accumulator scratch tile anywhere.
     pub(super) fn uses_scratch(&self, e: &Expr) -> bool {
-        match &e.kind {
-            ExprKind::Var(n) => matches!(self.symbols.get(n), Some(Binding::Scratch)),
-            ExprKind::Binary { lhs, rhs, .. } => self.uses_scratch(lhs) || self.uses_scratch(rhs),
-            ExprKind::Unary { rhs, .. } => self.uses_scratch(rhs),
-            ExprKind::Call { args, .. } => args.iter().any(|a| self.uses_scratch(a)),
-            _ => false,
-        }
+        let mut found = false;
+        e.walk(&mut |e| {
+            if let ExprKind::Var(n) = &e.kind {
+                found |= matches!(self.symbols.get(n), Some(Binding::Scratch));
+            }
+        });
+        found
     }
 
     /// Collect the scalar-parameter indices an epilogue coefficient references,

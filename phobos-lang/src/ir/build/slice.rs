@@ -283,15 +283,13 @@ impl Build {
         let slice = Slice {
             sizes: static_sizes.iter().map(|&d| extent(d)).collect(),
             masked,
-            divs: divs.clone(),
+            divs,
         };
         let mut operands = vec![src];
         operands.extend_from_slice(&offsets);
         operands.extend_from_slice(&dyn_sizes);
         operands.extend_from_slice(&extents);
-        let view = self.value(OpKind::Slice(slice), &operands, ty);
-        self.set_view_divs(view, divs);
-        Ok(view)
+        Ok(self.value(OpKind::Slice(slice), &operands, ty))
     }
 
     /// A partially out-of-bounds slice staged into a fresh, in-bounds tile.

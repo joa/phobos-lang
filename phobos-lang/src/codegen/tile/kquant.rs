@@ -174,42 +174,6 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::ori(low, high, self.loc))
     }
 
-    /// Sixteen bytes at a sixteen-aligned offset of the column's block, as
-    /// four words.
-    pub(super) fn qg_u128(
-        &self,
-        block: &Block<'c>,
-        qb: &MemVal<'c>,
-        lanes: &Lanes<'c>,
-        off: Value<'c, 'c>,
-    ) -> Result<[Value<'c, 'c>; 4]> {
-        self.qg_u128_at(block, qb, lanes.qb_row, off)
-    }
-
-    /// Sixteen bytes at a sixteen-aligned offset of `row`, as four words.
-    pub(super) fn qg_u128_at(
-        &self,
-        block: &Block<'c>,
-        mem: &MemVal<'c>,
-        row: Value<'c, 'c>,
-        off: Value<'c, 'c>,
-    ) -> Result<[Value<'c, 'c>; 4]> {
-        let v = self.vec_load_al(
-            block,
-            mem.mem,
-            &[row, off],
-            Type::vector(&[16], self.i8_t),
-            16,
-        )?;
-        let v = self.vec_bitcast(block, v, Type::vector(&[4], self.i32_t))?;
-        Ok([
-            self.vec_extract(block, v, &[0], self.i32_t)?,
-            self.vec_extract(block, v, &[1], self.i32_t)?,
-            self.vec_extract(block, v, &[2], self.i32_t)?,
-            self.vec_extract(block, v, &[3], self.i32_t)?,
-        ])
-    }
-
     /// The staged projection's reads for a K-quant thread: its column's
     /// block header, the bytes of its 32-element group, and the group index
     /// the decode needs at runtime.
@@ -224,15 +188,16 @@ impl<'c> Codegen<'c> {
     ) -> Result<()> {
         let two = self.const_index(block, 2)?;
         let four = self.const_index(block, 4)?;
+        let row = lanes.qb_row;
         match fmt {
             QgFormat::Q4k | QgFormat::Q5k => {
                 // d, dmin and the twelve scale bytes: one sixteen-byte load.
-                regs.extend(self.qg_u128(block, qb, lanes, at.blk_off)?);
+                regs.extend(self.qg_words(block, qb, row, at.blk_off, 16)?);
                 if fmt == QgFormat::Q5k {
                     // The whole qh plane; run `ib` takes bit `ib` of it.
                     for off in [16, 32] {
                         let at_qh = self.qg_at(block, at, off, 0)?;
-                        regs.extend(self.qg_u128(block, qb, lanes, at_qh)?);
+                        regs.extend(self.qg_words(block, qb, row, at_qh, 16)?);
                     }
                 }
                 // Runs 2p and 2p + 1 share the 32-byte plane p, as its low
@@ -247,7 +212,7 @@ impl<'c> Codegen<'c> {
                 for half in [0, 16] {
                     let step = self.const_index(block, half)?;
                     let at_qs = self.addi(block, off, step)?;
-                    regs.extend(self.qg_u128(block, qb, lanes, at_qs)?);
+                    regs.extend(self.qg_words(block, qb, row, at_qs, 16)?);
                 }
                 regs.push(self.numeric_cast(block, at.ib, self.i32_t)?);
             }
@@ -267,7 +232,7 @@ impl<'c> Codegen<'c> {
                 for off in [0, 16] {
                     let step = self.const_index(block, off)?;
                     let at_ql = self.addi(block, ql, step)?;
-                    regs.extend(self.qg_u128(block, qb, lanes, at_ql)?);
+                    regs.extend(self.qg_words(block, qb, row, at_ql, 16)?);
                 }
                 let qh = self.muli(block, g, thirty_two)?;
                 let qh_base = self.const_index(block, 128)?;
@@ -276,11 +241,11 @@ impl<'c> Codegen<'c> {
                 for off in [0, 16] {
                     let step = self.const_index(block, off)?;
                     let at_qh = self.addi(block, qh, step)?;
-                    regs.extend(self.qg_u128(block, qb, lanes, at_qh)?);
+                    regs.extend(self.qg_words(block, qb, row, at_qh, 16)?);
                 }
                 // The two signed scale bytes of runs 2 ib and 2 ib + 1.
                 let sc = self.qg_at(block, at, 192, 2)?;
-                regs.push(self.qg_u16(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 2)?);
                 let quarter = self.remui(block, at.ib, four)?;
                 regs.push(self.numeric_cast(block, quarter, self.i32_t)?);
             }

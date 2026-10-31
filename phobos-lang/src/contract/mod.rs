@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ast::{Dim, Kernel, Type as AstType};
 use crate::ir::{Ir, OpKind, Scalar, Type};
+use crate::shape::lcm;
 
 /// The contract of one kernel of a compiled module.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,8 +268,7 @@ fn sym_dims(kernel: &Kernel, ir: &Ir, params: &[Param]) -> Vec<SymDim> {
                         && t.shape[axis].is_dyn()
                         && !bound(&out, name)
                     {
-                        let promised = t.div[axis].max(1);
-                        let multiple_of = EXTENT_MULTIPLE * promised / gcd(EXTENT_MULTIPLE, promised);
+                        let multiple_of = lcm(EXTENT_MULTIPLE, t.div[axis].max(1));
                         out.push(SymDim { name: name.clone(), param: i, axis: Some(axis), multiple_of });
                     }
                 }
@@ -277,10 +277,6 @@ fn sym_dims(kernel: &Kernel, ir: &Ir, params: &[Param]) -> Vec<SymDim> {
         }
     }
     out
-}
-
-fn gcd(a: i64, b: i64) -> i64 {
-    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 mod entry;

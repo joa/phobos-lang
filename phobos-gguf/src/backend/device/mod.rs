@@ -21,6 +21,7 @@ use crate::quant::Quant;
 use super::{
     Attn, AttnPrep, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
     HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, RawAt, QBuf, RawBuf, Rope,
+    quant_add_unfused, rope_gather_unfused,
 };
 
 mod arena;
@@ -56,7 +57,7 @@ use fused::*;
 use kernels::*;
 
 pub use experts::moe_qgemm_src;
-pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, QGEMM_TM, QGEMM_TN, attn_gemm_src, moe_gateup_src, moe_qdot_src, moe_topk_src, q4k_qdot_lanes_src};
+pub use kernels::{QGEMM_TM, QGEMM_TN, moe_gateup_src, moe_qdot_src, moe_topk_src, q4k_qdot_lanes_src};
 
 /// The formats `PHOBOS_RAW_QMMA` enables for the fused prompt projection.
 /// It takes a comma-separated list of format names, or a plain on/off flag.
@@ -126,9 +127,8 @@ type QmmaSplitKey = (usize, usize, usize);
 /// [`kernels::q8_qgemm_split_src`].
 type Q8gemmSplitKey = (usize, usize, usize);
 
-/// Format, `n`, `k`, slice count, and whether the sum adds into its
-/// destination, of a split decode matvec.
-type QdotSplitKey = (Quant, usize, usize, usize, bool);
+/// Format, `n`, `k` and slice count of a split decode matvec.
+type QdotSplitKey = (Quant, usize, usize, usize);
 
 /// Launches a streamed pass records before issuing them; see
 /// [`DeviceBackend::streamed`].
@@ -203,7 +203,7 @@ pub struct DeviceBackend {
     /// width, `k` and split count. Built when the unsplit grid is declined.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
     /// The K-quant decode matvec split along `k` and its reduce, by format,
-    /// `n`, `k` and slice count; see [`DeviceBackend::project_raw_split`].
+    /// `n`, `k` and slice count; see [`DeviceBackend::project_raw_split_add`].
     qdot_split_mods: RefCell<HashMap<QdotSplitKey, (Module, Module)>>,
     /// Whether a narrow, long K-quant decode matvec splits along `k`. On by
     /// default; `PHOBOS_QDOT_SPLIT=0` keeps one program per tile.
@@ -382,7 +382,6 @@ pub struct DeviceBackend {
     argmax_scratch: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// The blocked attention kernels, keyed like `attentions`.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
-    attn_gemm: RefCell<HashMap<usize, Module>>,
     /// The tensor-core prompt attention, by head dimension and group size.
     attn_tc: RefCell<HashMap<(usize, usize), Module>>,
     /// Whether a prompt's attention takes [`kernels::attn_tc_src`] where it
@@ -457,9 +456,8 @@ pub struct DeviceBackend {
     /// anyway, so the arena brings no benefit. `PHOBOS_STATE_ARENA=1` turns
     /// it on.
     state_arena_on: bool,
-    /// Whether the small, hot constants go in the bulk arena instead of
-    /// `hot`. A hot plane in a bulk slab keeps the whole slab resident.
-    /// `PHOBOS_ARENA_CONST=1` turns it on.
+    /// Whether the small, hot constants go in `hot`'s slabs instead of an
+    /// allocation each. `PHOBOS_ARENA_CONST=1` turns it on.
     arena_const: bool,
     /// Whether the bulk weights go in the arena. `PHOBOS_ARENA=0` gives each
     /// tensor its own allocation.
@@ -473,47 +471,28 @@ pub struct DeviceBackend {
     /// Never changed after construction, since a launch keys its function
     /// cache on the module's address.
     formats: HashMap<Quant, formats::FormatKernels>,
-    /// IQ1_S's grid, [`crate::quant::iq1s_flat_grid`] at one `i32` per
-    /// lane. Shared by every IQ1_S and IQ1_M weight.
-    iq1s_grid: DeviceBuffer<i32>,
-    /// IQ2_XXS's magnitude grid and sign table, flattened like IQ1_S's.
-    iq2xxs_grid: DeviceBuffer<i32>,
-    iq2xxs_signs: DeviceBuffer<i32>,
-    /// IQ2_S's magnitude grid and sign table. The signs are keyed by raw
-    /// byte rather than parity index, unlike IQ2_XXS's.
-    iq2s_grid: DeviceBuffer<i32>,
-    iq2s_signs: DeviceBuffer<i32>,
-    /// IQ2_XS's magnitude grid. Its signs use `iq2xxs_signs`.
-    iq2xs_grid: DeviceBuffer<i32>,
-    /// IQ3_XXS's magnitude grid, four `i32` lanes per entry. Its signs use
-    /// `iq2xxs_signs`.
-    iq3xxs_grid: DeviceBuffer<i32>,
-    /// IQ3_S's magnitude grid, four `i32` lanes per entry. Its signs use
-    /// `iq2s_signs`.
-    iq3s_grid: DeviceBuffer<i32>,
     /// IQ4_XS's fixed sixteen-value codebook, indexed directly by each
-    /// nibble. See [`crate::quant::iq4xs_flat_codebook`].
+    /// nibble. See [`crate::quant::iq4_xs::flat_codebook`].
     iq4xs_codebook: DeviceBuffer<i32>,
-    /// The same tables at one `i8` per slot, read by the f32 decode matvecs
-    /// and `qdecode`. The i32 copies above serve the `gather`-based
-    /// fallbacks.
+    /// IQ1_S's grid at one `i8` per slot, read by the f32 decode matvecs and
+    /// `qdecode`. Shared by every IQ1_S and IQ1_M weight.
     iq1s_grid_packed: DeviceBuffer<i8>,
     /// The IQ1_S grid with the delta and signs folded in, giving an exact
-    /// `i8` weight. See `quant::iq1s_signed_grid`.
+    /// `i8` weight. See `quant::iq1_s::signed_grid`.
     iq1s_signed_grid: DeviceBuffer<i8>,
     /// Whether the fused prompt projection is used. On by default,
     /// `PHOBOS_RAW_QMMA=0` turns it off.
     raw_qmma: Cell<bool>,
     /// Which formats [`raw_qmma`] covers, from `PHOBOS_RAW_QMMA`, which also
-    /// takes a comma-separated list such as `iq1s,iq2xxs`.
+    /// takes a comma-separated list of format names such as `IQ1_S,IQ2_XXS`.
     raw_qmma_formats: Vec<Quant>,
     /// The staged prompt projections. See `qmma_raw.rs`.
     qgemm: qmma_raw::Qgemm,
-    /// `PHOBOS_DENSE_SCRATCH=0` uses a pooled scratch pair per weight
-    /// instead of one shared pair. `PHOBOS_TRIM=1` also frees the scratch
-    /// and the pool's free list after a dense pass. See `residency.rs`.
-    dense_scratch_shared: bool,
+    /// `PHOBOS_TRIM=1` frees the dense scratch and the pool's free list
+    /// after a dense pass. See `residency.rs`.
     trim_after_dense: bool,
+    /// The other IQ formats' grids, packed like IQ1_S's. IQ2_XS and IQ3_XXS
+    /// read IQ2_XXS's signs, IQ3_S reads IQ2_S's.
     iq2xxs_grid_packed: DeviceBuffer<i8>,
     /// The signs as +/-1 for the float decode, followed by the same signs as
     /// a 0/-1 mask for the dp4a decode.
@@ -523,9 +502,6 @@ pub struct DeviceBackend {
     iq2xs_grid_packed: DeviceBuffer<i8>,
     iq3xxs_grid_packed: DeviceBuffer<i8>,
     iq3s_grid_packed: DeviceBuffer<i8>,
-    /// `[0, 1, .., 7]`, the offsets a grid-coded raw kernel's `gather`
-    /// broadcasts against to read an eight-wide lane in one call.
-    iota8: DeviceBuffer<i32>,
     /// One entry per `quantize_act` in a pass, each grown to the largest
     /// projection seen. Several are live at once, and a pass takes them in
     /// the same order every time.

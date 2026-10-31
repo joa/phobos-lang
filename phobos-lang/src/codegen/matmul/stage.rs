@@ -88,13 +88,50 @@ impl<'c> Codegen<'c> {
             block,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, guard_iv, hi, self.loc),
         )?;
+        self.if_then(block, more, prefetch)
+    }
+
+    /// Emits `if cond { then(...) }`, which yields nothing.
+    pub(in crate::codegen) fn if_then(
+        &mut self,
+        block: &Block<'c>,
+        cond: Value<'c, 'c>,
+        then: impl FnOnce(&mut Self, &Block<'c>) -> Result<()>,
+    ) -> Result<()> {
         let then_block = Block::new(&[]);
-        prefetch(self, &then_block)?;
+        then(self, &then_block)?;
         then_block.append_operation(scf::r#yield(&[], self.loc));
         let then_region = Region::new();
         then_region.append_block(then_block);
-        block.append_operation(scf::r#if(more, &[], then_region, Region::new(), self.loc));
+        block.append_operation(scf::r#if(cond, &[], then_region, Region::new(), self.loc));
         Ok(())
+    }
+
+    /// Emits `if at < hi { f(accs) } else { accs }` and returns its results.
+    /// The condition is CTA-uniform, as [`Self::guarded_prefetch`] says.
+    pub(in crate::codegen) fn guarded_iteration(
+        &mut self,
+        block: &Block<'c>,
+        at: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        accs: &[Value<'c, 'c>],
+        f: impl FnOnce(&mut Self, &Block<'c>, &[Value<'c, 'c>]) -> Result<Vec<Value<'c, 'c>>>,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let more = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, at, hi, self.loc))?;
+        let then_block = Block::new(&[]);
+        let ran = f(self, &then_block, accs)?;
+        then_block.append_operation(scf::r#yield(&ran, self.loc));
+        let then_region = Region::new();
+        then_region.append_block(then_block);
+
+        let else_block = Block::new(&[]);
+        else_block.append_operation(scf::r#yield(accs, self.loc));
+        let else_region = Region::new();
+        else_region.append_block(else_block);
+
+        let types: Vec<Type<'c>> = ran.iter().map(|v| v.r#type()).collect();
+        let op = block.append_operation(scf::r#if(more, &types, then_region, else_region, self.loc));
+        (0..ran.len()).map(|i| Ok(detach(op.result(i)?.into()))).collect()
     }
 
     /// The staged f16 shared buffer for one tile-dot operand, and whether it

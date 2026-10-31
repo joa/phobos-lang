@@ -28,6 +28,23 @@ use phobos_kernels::util::kernel_cache_dir;
 const USAGE: &str = "usage: phobos-cache <warm|list|clear|prune> [--chip CHIP]... [--dir CACHE] \
                      [--manifest DIR]... [--jobs N] [--force] [--ptxas PATH | --no-ptxas] [KERNEL...]";
 
+const HELP: &str = "
+  warm     compile every request of the manifests (--manifest DIR, recorded with
+           PHOBOS_KERNEL_MANIFEST) for each chip, with no GPU, so a run on a card
+           of that chip starts warm; --force recompiles what is cached, and each
+           PTX is assembled with ptxas first when it is found (--ptxas PATH,
+           --no-ptxas)
+  list     the cached kernels of each chip
+  clear    remove the cached kernels named (`*` is the only wildcard), or every
+           entry when none is named
+  prune    keep only the entries the manifests ask for
+
+  --chip CHIP   a chip to act on, repeatable; default every supported one
+  --dir CACHE   the cache to act on; default the one a run reads
+  --jobs N      compiles at once for warm; default the logical CPUs
+  -V, --version print the version and the compiler fingerprint
+  -h, --help    print this message";
+
 /// The command line after the subcommand: repeatable `--flag value` pairs,
 /// switches, and the positionals left over.
 #[derive(Default)]
@@ -91,6 +108,10 @@ impl Args {
 fn main() -> Result<()> {
     let mut raw = std::env::args().skip(1);
     let command = raw.next().unwrap_or_default();
+    if command == "help" || std::env::args().any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}\n{HELP}");
+        return Ok(());
+    }
     let args = Args::parse(raw)?;
     if command == "--version" || command == "-V" || args.version {
         let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;

@@ -14,11 +14,7 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use melior::{
-    dialect::DialectRegistry,
-    ir::{Location, Module, operation::OperationLike},
-    utility::register_all_dialects,
-};
+use melior::ir::{Location, Module, operation::OperationLike};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 use sha2::{Digest, Sha256};
 
@@ -26,6 +22,7 @@ use crate::ast::{Dim, Type as AstType};
 use crate::codegen::Planned;
 use crate::ir::OpKind;
 use crate::ir::uniform::{self, Kind};
+use crate::shape::row_major_strides;
 pub use model::{Cta, Origin, Trace, Variant};
 use model::{Role, Uniformity};
 
@@ -153,11 +150,7 @@ pub fn trace_source(req: &Request, file: &std::sync::Arc<crate::diag::SourceFile
     };
     base.index_bitwidth = crate::index_bits(&base, &kernels)?;
 
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = melior::Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
 
     let mut out: Option<Result<Trace>> = None;
@@ -321,7 +314,7 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
             model::Tensor {
                 elem_bytes: elem.bytes().unwrap_or(4),
                 elem: elem.mlir_name().to_string(),
-                strides: dense_strides(&shape),
+                strides: row_major_strides(&shape),
                 shape,
                 role,
                 name,
@@ -380,15 +373,6 @@ fn summarize(s: model::Step) -> Option<model::Summary> {
         reads,
         writes,
     })
-}
-
-/// Row-major strides, in elements, of a dense tensor of `shape`.
-fn dense_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1; shape.len()];
-    for d in (0..shape.len().saturating_sub(1)).rev() {
-        strides[d] = strides[d + 1] * shape[d + 1];
-    }
-    strides
 }
 
 /// A short stable name for an op's kind.

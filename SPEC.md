@@ -5,14 +5,16 @@
 3. [Types](#types)
 4. [Statements](#statements)
    - [Functions](#functions)
+   - [Standard library](#standard-library)
 5. [Subscripts](#subscripts)
 6. [Operators and conversions](#operators-and-conversions)
 7. [Bounds and masking](#bounds-and-masking)
 8. [Tiles and shared memory](#tiles-and-shared-memory)
-9. [Built-ins](#built-ins)
-10. [Quantized built-ins](#quantized-built-ins)
-11. [Attributes](#attributes)
-12. [Examples](#examples)
+9. [Per-thread values](#per-thread-values)
+10. [Built-ins](#built-ins)
+11. [Quantized built-ins](#quantized-built-ins)
+12. [Attributes](#attributes)
+13. [Examples](#examples)
 
 ## Grammar
 
@@ -26,8 +28,8 @@ function    = "fn" ident "(" [ ident { "," ident } ] ")" ( "=" expr terminator |
 
 attribute   = "@" ident [ "(" [ attr_arg { "," attr_arg } ] ")" ] ;
 attr_arg    = ident "in" "[" int { "," int } "]"       (* autotune search dim: TILE_M in [64,128] *)
-            | ident "=" literal                        (* keyword argument:    arch = sm_80       *)
-            | literal ;                                (* positional / flag:   256 | read_only    *)
+            | ident "=" literal                        (* keyword argument:    M = TILE_M         *)
+            | literal ;                                (* positional / flag:   256 | wmma         *)
 literal     = int | float | ident | "true" | "false" ;
 
 params      = param { "," param } ;
@@ -49,7 +51,7 @@ var_stmt    = "var" ident ( ":" type [ "=" expr ] | "=" expr ) terminator ;
 assign_stmt = lvalue ( "=" | "+=" | op_assign ) expr terminator ;
 op_assign   = "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 lvalue      = ident [ "[" subscripts "]" ] ;           (* a name or an indexed name *)
-for_stmt    = "for" [ "<" "unroll" expr ">" ] ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
+for_stmt    = "for" [ "<" "unroll" term ">" ] ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
 while_stmt  = "while" expr block ;
 if_stmt     = "if" expr block [ "else" ( block | if_stmt ) ] ;
 jump_stmt   = ( "break" | "continue" | "return" ) terminator ;
@@ -68,8 +70,10 @@ bit_and     = shift { "&" shift } ;
 shift       = term { ( "<<" | ">>" ) term } ;
 term        = factor { ( "+" | "-" ) factor } ;
 factor      = unary { ( "*" | "/" | "%" ) unary } ;
-unary       = [ "-" | "!" | "~" ] postfix ;
-postfix     = primary { "[" subscripts "]" | "(" [ args ] ")" } ;
+unary       = ( "-" | "!" | "~" ) unary | postfix ;
+postfix     = ( call | primary ) { "[" subscripts "]" } ;
+call        = ident [ "<" setting { "," setting } ">" ] "(" [ args ] ")" ;   (* only a name is called *)
+setting     = "over" postfix | ( "width" | "from" | "xor" | "down" | "up" ) term ;
 args        = expr { "," expr } ;
 primary     = int | float | "true" | "false" | ctx_field | ident | "(" expr ")" ;
 ctx_field   = "ctx" "." ident [ "." ident ] ;
@@ -96,7 +100,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | Integer literals | An index, as wide as the kernel's indices: 32 bits unless it compiles at 64. A 32-bit index holds whatever a 32-bit word spells, from `-2147483648` (a negated literal is checked as the negative number) to `4294967295`, which is the word of its bits, so `2155905152` is the mask `0x80808080`; a literal past that is an error. |
 | Float literals | An `f32`, widened where it meets an `f64`, so `0.1` stored to an `f64` tensor is `0.10000000149011612`. A literal that is infinite or, nonzero, zero as an `f32` is an error. |
 | Comments | `// ...` to end of line. |
-| Statement end | A newline or `;`. Optional before `}` or end of file. |
+| Statement end | A newline or `;`. Optional before `}` or end of file. A newline ends a statement only after an identifier, a literal, `true`, `false`, `)`, `]` or `}`; after anything else, such as an operator or a comma, the statement goes on to the next line. |
 | `else` | Must follow the `}` of the then-block on the same line; a newline there ends the `if`. |
 | Nesting | Expressions, unary operators and blocks nest at most 64 levels; deeper source is an error. |
 
@@ -128,7 +132,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar or a tile that broadcasts to it, a row or a column, and `acc += dot_t(a, b)` adds the product in place. |
 | `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
-| `for<unroll n> i in range(lo, hi[, step])` | The same iterations, the body built `n` times a turn (`i`, `i + step`, ..., each copy in its own scope) while a whole turn fits, then the rest one at a time. `n` and `step` are constants, `step` positive; `n` may be an `@autotune` name, so `@autotune(U in [1, 2, 4])` tries each (1 is the plain loop). A fragment accumulator is carried through the main loop and the rest alike. The k-loop of a GEMM (the one `@pipeline` double-buffers the operand pairs of) builds each copy after a turn's first under a guard instead, with no rest loop, and where the GEMM double-buffers, running two iterations a turn, `n` rounds up to even, so 1 and 2 build the same loop. Any other loop is not pipelined once unrolled. Not for a loop that updates an `@registers` tile. |
+| `for<unroll n> i in range(lo, hi[, step])` | The same iterations, the body built `n` times a turn (`i`, `i + step`, ..., each copy in its own scope) while a whole turn fits, then the rest one at a time. `n` is a constant from 1 to 64 and `step` a positive constant; `n` may be an `@autotune` name, so `@autotune(U in [1, 2, 4])` tries each (1 is the plain loop). A fragment accumulator is carried through the main loop and the rest alike. The k-loop of a GEMM (the one `@pipeline` double-buffers the operand pairs of) builds each copy after a turn's first under a guard instead, with no rest loop, and where the GEMM double-buffers, running two iterations a turn, `n` rounds up to even, so 1 and 2 build the same loop. Any other loop is not pipelined once unrolled. Not for a loop that updates an `@registers` tile. |
 | `while c { }`, `if c { } else { }` | Scalar condition. |
 | `break`, `continue` | Leave the innermost loop, or its current iteration. A `for` runs its remaining iterations as no-ops after a `break`; a `while` stops at its next test. |
 | `return` | Skips the rest of the kernel. |
@@ -330,13 +334,6 @@ A blocked int8 contraction keeps its accumulator in the integer tensor cores' re
 
 On the f16 tensor cores (`@tensorcore` at 64-bit indices, where `dot` runs as `mma.sync`) an `f32` tile stays in the accumulator registers the same way, whenever every use of it can read it there. It starts filled with a float, or written whole by a `dot` or `dot_t`. From then on it may be accumulated into by `dot` and `dot_t`, updated by any elementwise expression that reads it at the element it writes (other tiles broadcast to it, such as a `[M, 1]` column, and scalars are fine), reduced by `rowmax` and `rowsum`, read as another `dot`'s operand, and stored whole to a tensor slice; a loop carries it. Flash attention's scores qualify: the scale, the row max, the exponent and the row sum run in each lane's registers, and the scores reach the second `dot` through one shared tile. A row reduction needs every warp to own whole rows, `M` a multiple of 16 times the warp count. The fragments live at once may hold at most 144 `f32` a lane, counted over this tile and the accumulators its loops carry. Otherwise the tile stays in shared memory, as anything else that reads it does. A `[M, 1]` `f32` tile that the row reductions of such fragments write, and that only fills, elementwise updates of `[M, 1]` tiles, copies, an accumulator's row scaling and the fragments' elementwise updates touch, stays in the registers of the lanes that hold those rows, as flash attention's running max and sum do; an accumulator such a column scales splits its rows over the warps for it.
 
-### Attention
-
-| Built-in | Semantics |
-|---|---|
-
-Shapes: `q` a named `[QG, D]` tile, unmasked; `K`, `V` named `f16` tensor parameters; `WM`, `WL` named `[QG, W]` tiles and `WACC` a named `[QG * W, D]` tile; with `D % 32 == 0` and `W` = CTA threads / 32. Merging the `W` partials is the caller's.
-
 ## Quantized built-ins
 
 Symbols used below: `K` is the contraction length, a multiple of 256 unless stated. `N` is output columns. `qb` is the raw block bytes, `[N, K/256 * bytes]` `i8`. `d` is the per-block scale plane, `[N, K/256]` `f16`. Activation scales `a_scales` are Q8_0: one `f32` per 32 elements.
@@ -386,7 +383,7 @@ Tables are `[1, n]` `i8` tensors, built on the host by `phobos-gguf`'s `quant` m
 | `<fmt>` | `qmma_staged_t` | `qgemm_t` |
 |---|---|---|
 | `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid2` |
-| `iq1m` | `grid` = `iq1s_packed_grid` | as `iq1s` |
+| `iq1m` | | as `iq1s` |
 | `iq2xxs` | `grid, signs` = `iq2xxs_packed_grid`, `iq2xxs_packed_signs` | `grid, masks` = `iq2xxs_packed_grid`, `iq2xxs_sign_masks` |
 | `iq2xs` | `iq2xs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
 | `iq2s` | `iq2s_packed_grid`, `iq2s_packed_signs` | `iq2s_packed_grid`, `iq2s_sign_masks` |
@@ -408,7 +405,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 
 | Attribute | Effect |
 |---|---|
-| `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two increasing values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Two decreasing values, or three or more: an explicit list, so `[256, 128]` is 256 and 128 with 256 first. The first choice seeds the shape environment. |
+| `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two increasing positive values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Two decreasing values, or three or more: an explicit list, so `[256, 128]` is 256 and 128 with 256 first. The first choice seeds the shape environment. |
 | `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
 | `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. A dynamic `DIM` that breaks the promise traps at entry; in a `@persistent` kernel with `grid_barrier`, the other blocks then wait at the barrier for good. |
 | `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. Each argument is an integer or an `@autotune` constant, so `@autotune(T in [128, 256]) @launch(T)` searches the CTA size. |

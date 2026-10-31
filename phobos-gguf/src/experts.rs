@@ -152,11 +152,10 @@ impl ExpertStack {
     /// [`ExpertStack::grouped_scales`]. A format with no header scale gets
     /// zeros.
     pub fn grouped_scales_into(&self, e: usize, out: &mut [u16]) {
-        let Some(split) = self.quant.spec().raw_scales else {
+        let Some(scales) = self.quant.spec().raw_scales_of(self.expert(e)) else {
             out.fill(0);
             return;
         };
-        let scales = split(self.expert(e), self.k, self.n);
         group_rows_into(&scales.d, self.n, self.blocks_per_row(), 1, out);
     }
 

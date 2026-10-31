@@ -19,7 +19,6 @@ fn summed(n: &str, st: &str) -> String {
 #[test]
 fn an_unrolled_loop_is_a_main_loop_and_a_remainder() {
     let mlir = emit_mlir(&summed("4", "32"));
-    assert!(module_verifies(&mlir), "{mlir}");
     // The main loop's body reads X four times, the remainder's once.
     assert_eq!(mlir.matches("scf.for").count(), 2, "{mlir}");
     assert_eq!(mlir.matches("memref.load").count() - mlir.matches("memref.load %alloca").count(), 5, "{mlir}");
@@ -36,6 +35,8 @@ fn unroll_errors_name_the_problem() {
     assert!(err.contains("constant n"), "got: {err}");
     let err = emit_err(&summed("2", "ctx.lane + 1"));
     assert!(err.contains("constant positive step"), "got: {err}");
+    let err = emit_err(&summed("100000000", "32"));
+    assert!(err.contains("from 1 to 64"), "got: {err}");
     let err = crate::parse(&summed("2", "32").replace("for<unroll 2>", "for<twice 2>")).unwrap_err();
     assert!(err.to_string().contains("takes `unroll`"), "got: {err}");
 }
@@ -86,8 +87,7 @@ fn a_pipelined_register_matmul_runs_an_even_number_of_halves_a_turn() {
     // Two halves a turn already, and an odd count rounds up.
     assert_eq!(ifs("2"), ifs("1"));
     assert_eq!(emit_mlir(&matmul("3", "@pipeline", "f32")), emit_mlir(&matmul("4", "@pipeline", "f32")));
-    let mlir = emit_mlir_sync(&matmul("4", "@pipeline\n@tensorcore", "f16"), "sm_80");
-    assert!(module_verifies(&mlir), "{mlir}");
+    emit_with(&matmul("4", "@pipeline\n@tensorcore", "f16"), "sm_80", 64);
 }
 
 #[test]

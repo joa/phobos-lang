@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::ast::Scalar;
-use crate::ir::RawFmt;
+use crate::ir::{Intrinsic, RawFmt};
 
 /// Built-ins with a name of their own; the conversions and the quantized
 /// families are added from their tables.
@@ -23,7 +23,8 @@ pub(crate) fn builtins() -> &'static [String] {
         let conversions = Scalar::NAMES.iter().filter(|&&n| n != "bool").map(|n| n.to_string());
         let quantized = RawFmt::ALL
             .iter()
-            .flat_map(|f| ["qmma_staged_t", "qgemm_t"].map(|suffix| format!("{}_{suffix}", f.name())));
+            .flat_map(|f| ["qmma_staged_t", "qgemm_t"].map(|suffix| format!("{}_{suffix}", f.name())))
+            .filter(|name| Intrinsic::from_name(name).is_some());
         NAMED.iter().map(|n| n.to_string()).chain(conversions).chain(quantized).collect()
     })
 }
@@ -43,6 +44,19 @@ mod tests {
             })
             .collect();
         assert!(unknown.is_empty(), "listed, but the build does not know them: {unknown:?}");
+    }
+
+    #[test]
+    fn a_format_without_the_family_is_not_a_builtin() {
+        // SPEC.md's format table leaves these out; the build used to take
+        // the name and fail in codegen.
+        let base = phobos_base::context::Context::default();
+        for name in ["q2k_qgemm_t", "iq4xs_qgemm_t", "q4k_qmma_staged_t", "iq1m_qmma_staged_t", "q6k_qmma_t"] {
+            assert!(!builtins().iter().any(|b| b == name), "{name} is listed");
+            let src = format!("kernel k(A: tensor<f32>[N]) {{\n    let x = {name}()\n}}\n");
+            let Err(err) = crate::compile_raw(&base, &src) else { panic!("{name} compiled") };
+            assert!(err.to_string().contains("unknown function"), "{name}: {err}");
+        }
     }
 
     #[test]

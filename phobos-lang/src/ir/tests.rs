@@ -290,16 +290,15 @@ fn intrinsic_names_round_trip() {
         Intrinsic::Gather,
         Intrinsic::ArgSel,
     ];
-    for fmt in RawFmt::ALL {
-        all.extend([
-            Intrinsic::RawQmma(fmt),
-            Intrinsic::RawQmmaStaged(fmt),
-            Intrinsic::RawQgemm(fmt),
-        ]);
-    }
+    all.push(Intrinsic::RawQmma(RawFmt::Iq1s));
+    all.extend(RawFmt::ALL.into_iter().filter(|f| f.has_qmma_staged()).map(Intrinsic::RawQmmaStaged));
+    all.extend(RawFmt::ALL.into_iter().filter(|f| f.has_qgemm()).map(Intrinsic::RawQgemm));
     for i in all {
         assert_eq!(Intrinsic::from_name(&i.name()), Some(i), "{}", i.name());
     }
+    assert_eq!(Intrinsic::from_name("q2k_qgemm_t"), None);
+    assert_eq!(Intrinsic::from_name("q4k_qmma_staged_t"), None);
+    assert_eq!(Intrinsic::from_name("q4k_qmma_t"), None);
     assert_eq!(Intrinsic::from_name("wobble"), None);
     assert_eq!(Intrinsic::from_name("iq2xxs_qdot_t"), None);
     assert_eq!(Intrinsic::from_name("q9k_qdot_t"), None);
@@ -377,7 +376,7 @@ kernel k(%A.0: tensor<f32>[?, ?], %n.1: index) {
 }
 
 #[test]
-fn tile_types_know_their_bytes() {
+fn a_padded_tile_type_prints_its_stride_and_alignment() {
     let t = TileType {
         elem: Scalar::F16,
         shape: vec![Extent::Fixed(64), Extent::Fixed(64)],
@@ -388,17 +387,8 @@ fn tile_types_know_their_bytes() {
         },
         space: Space::Shared,
     };
-    assert_eq!(t.physical_elems(), Some(64 * 72));
-    assert_eq!(t.bytes(), Some(64 * 72 * 2));
     assert_eq!(
         Type::Tile(t).to_string(),
         "tile<f16>[64, 64]@shared{stride 72, align 8}"
     );
-    let dynamic = TileType {
-        elem: Scalar::F32,
-        shape: vec![Extent::Dyn],
-        layout: Layout::CONTIGUOUS,
-        space: Space::Global,
-    };
-    assert_eq!(dynamic.bytes(), None);
 }

@@ -8,9 +8,6 @@ impl DeviceBackend {
     /// Growing drains the stream first, because launches already recorded in
     /// this pass still read the old buffer.
     pub(super) fn dense_scratch(&self, which: usize, len: usize) -> Result<Buf> {
-        if !self.dense_scratch_shared {
-            return self.alloc(len);
-        }
         if let Some(buf) = self.dense_scratch[which].get() {
             if self.len_of(buf)? >= len {
                 return Ok(buf);

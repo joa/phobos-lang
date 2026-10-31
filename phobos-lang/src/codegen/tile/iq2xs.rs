@@ -1,5 +1,5 @@
-// IQ2_XS's decode geometry, shared by the contraction (`iq2xs_qdot.rs`) and
-// the expansion (`qdecode.rs`). A 16-bit qs halfword splits into a magnitude
+// IQ2_XS's decode geometry, which the staged projection (`qmma_signed.rs`)
+// decodes with. A 16-bit qs halfword splits into a magnitude
 // index (`% 512`) and a sign index (`/ 512`). The sign table is IQ2_XXS's.
 
 use super::*;

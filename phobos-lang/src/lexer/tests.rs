@@ -147,17 +147,17 @@ fn int_and_float_literals() {
 }
 
 #[test]
-fn tracks_line_and_column() {
+fn tracks_byte_spans() {
     let toks = Lexer::new("a\n  b").tokenize().unwrap();
-    assert_eq!((toks[0].line, toks[0].col), (1, 1)); // a
-    // toks[1] is the inserted terminator after a
-    assert_eq!(toks[1].tok, Tok::Semicolon);
-    // b is on line 2, column 3 (after two spaces)
+    assert_eq!(toks[0].span(), Span::new(0, 1)); // a
+    // toks[1] is the inserted terminator after a, empty at the newline
+    assert_eq!((&toks[1].tok, toks[1].span()), (&Tok::Semicolon, Span::new(1, 1)));
+    // b is past the newline and two spaces
     let b = toks
         .iter()
         .find(|t| t.tok == Tok::Ident("b".into()))
         .unwrap();
-    assert_eq!((b.line, b.col), (2, 3));
+    assert_eq!(b.span(), Span::new(4, 5));
 }
 
 #[test]
@@ -248,4 +248,12 @@ fn lexes_float_exponents() {
     assert_eq!(kinds("1e-6")[0], Tok::Float(1e-6));
     assert_eq!(kinds("2.5E+3")[0], Tok::Float(2500.0));
     assert!(Lexer::new("1e").tokenize().unwrap_err()[0].message.contains("exponent"));
+}
+
+#[test]
+fn every_keyword_lexes_to_its_token_and_prints_as_written() {
+    for (text, tok) in &crate::token::KEYWORDS {
+        assert_eq!(kinds(text)[0], *tok);
+        assert_eq!(tok.to_string(), format!("`{text}`"));
+    }
 }

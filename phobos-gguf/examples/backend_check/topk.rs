@@ -75,11 +75,14 @@ pub fn check_topk(failures: &std::cell::Cell<u32>) -> Result<()> {
         let want = route(logits, USED);
         let got_ids = &ids[r * USED..(r + 1) * USED];
         let same = want.iter().zip(got_ids).all(|(&(k, _), &g)| k as i32 == g);
+        // `total_cmp` ranks NaN above every number: a NaN error is the worst one,
+        // where `f32::max` would drop it.
         let err = want
             .iter()
             .zip(&ws[r * USED..(r + 1) * USED])
             .map(|(&(_, p), &g)| (p - g).abs())
-            .fold(0.0f32, f32::max);
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
         let ok = same && err < 1e-5;
         if !ok {
             failures.set(failures.get() + 1);

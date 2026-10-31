@@ -15,7 +15,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 
-pub use at_op::{AtOp, at_op};
+pub use at_op::AtOp;
 pub use builder::{At, Builder};
 pub use elem::*;
 pub use lanes::{Bytes, ThreadIndex};
@@ -472,10 +472,6 @@ impl Ir {
             At::Start(block) => (block, 0),
             At::Before(op) => (self.parent_block(op), self.position(op)),
             At::After(op) => (self.parent_block(op), self.position(op) + 1),
-            At::Index(block, index) => {
-                assert!(index <= self.ops(block).len(), "index past the end of {block}");
-                (block, index)
-            }
         }
     }
 
@@ -555,6 +551,61 @@ impl Ir {
         let (to, index) = self.resolve(at);
         self.block_data_mut(to).ops.insert(index, op);
         self.op_data_mut(op).parent = to;
+    }
+
+    /// Replaces loop `old` with one that also carries `inits`, of `types`,
+    /// after the values it carries already: `info` describes the new loop
+    /// and `bounds` are its bound operands. The body moves to a block with
+    /// an argument more for each new value, where `rewrite` takes it and
+    /// those arguments and returns what each yields. The old loop's
+    /// results become the new one's first, and the new loop and its yield
+    /// stand for the old loop's source. Returns the new loop.
+    pub fn add_carried(
+        &mut self,
+        old: OpId,
+        info: ForInfo,
+        bounds: &[ValueId],
+        inits: &[ValueId],
+        types: &[Type],
+        rewrite: impl FnOnce(&mut Ir, BlockId, &[ValueId]) -> Vec<ValueId>,
+    ) -> OpId {
+        let OpKind::For(old_info) = *self.kind(old) else {
+            panic!("{old} is not a loop");
+        };
+        let operands = self.operands(old).to_vec();
+        let (carried, hoisted) = operands[old_info.bound_operands()..].split_at(old_info.carried);
+        let body = self.blocks_of(old)[0];
+        let old_args = self.args(body).to_vec();
+        let arg_types: Vec<Type> = old_args.iter().map(|&a| self.ty(a).clone()).chain(types.iter().cloned()).collect();
+        let block = self.new_block(&arg_types);
+        let new_args = self.args(block).to_vec();
+        for (&from, &to) in old_args.iter().zip(&new_args) {
+            if let Some(name) = self.name(from).map(str::to_owned) {
+                self.set_name(to, name);
+            }
+            self.replace_all_uses(from, to);
+        }
+        let mut finals = Vec::new();
+        for op in self.ops(body).to_vec() {
+            if self.kind(op).is_terminator() {
+                finals = self.operands(op).to_vec();
+                self.erase_op(op);
+            } else {
+                self.move_op(op, At::End(block));
+            }
+        }
+        finals.extend(rewrite(self, block, &new_args[old_args.len()..]));
+        let outer = self.set_span(self.span(old));
+        self.create_op(At::End(block), OpKind::Yield, &finals, Vec::new(), Vec::new());
+        let result_types = self.results(old).iter().map(|&r| self.ty(r).clone()).chain(types.iter().cloned()).collect();
+        let new_operands = [bounds, carried, inits, hoisted].concat();
+        let new = self.create_op(At::Before(old), OpKind::For(info), &new_operands, result_types, vec![block]);
+        self.set_span(outer);
+        for (&from, &to) in self.results(old).to_vec().iter().zip(&self.results(new).to_vec()) {
+            self.replace_all_uses(from, to);
+        }
+        self.erase_op(old);
+        new
     }
 
     /// Copies the ops of `block` to `at`, all but its terminator, reading

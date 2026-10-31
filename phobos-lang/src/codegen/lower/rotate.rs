@@ -15,8 +15,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
-use melior::dialect::{arith, scf};
-use melior::ir::{Block, BlockLike, Region, RegionLike, Value, operation::OperationLike};
+use melior::dialect::arith;
+use melior::ir::{Block, BlockLike, Value, operation::OperationLike};
 
 use super::Lowered;
 use super::defer::writes_global;
@@ -239,13 +239,8 @@ impl<'c> Codegen<'c> {
         let more = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, hi, self.loc))?;
         for (stage, source) in stages {
             let buf = self.rotating[&stage].buf.clone();
-            let then = Block::new(&[]);
             let r = Rotation { stage, after: op, source, pending: 0 };
-            self.issue_rotation(&then, ir, iv, next, &r, &buf)?;
-            then.append_operation(scf::r#yield(&[], self.loc));
-            let region = Region::new();
-            region.append_block(then);
-            block.append_operation(scf::r#if(more, &[], region, Region::new(), self.loc));
+            self.if_then(block, more, |cg, then| cg.issue_rotation(then, ir, iv, next, &r, &buf))?;
             self.async_create_group(block)?;
         }
         Ok(())
@@ -271,13 +266,6 @@ impl<'c> Codegen<'c> {
     fn rotation_buffer(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<MemVal<'c>> {
         let Type::Tile(t) = ir.ty(ir.result(op)) else { anyhow::bail!("a stage of a non-tile") };
         let elem = self.ir_scalar_type(t.elem);
-        let shape = super::dims(&t.shape);
-        if t.layout.row_stride.is_some() {
-            self.alloc_tile_padded(block, elem, &shape)
-        } else if t.layout.swizzle.is_some() {
-            self.alloc_tile_swizzled(block, elem, &shape)
-        } else {
-            self.alloc_tile_shaped(block, elem, &shape)
-        }
+        self.alloc_tile_as(block, elem, &super::dims(&t.shape), &t.layout)
     }
 }
